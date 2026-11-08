@@ -188,7 +188,7 @@ flights_raw.printSchema()
 
 # COMMAND ----------
 
-display(flights_raw.limit(5))
+display(flights_raw.limit(5)) 
 
 # COMMAND ----------
 
