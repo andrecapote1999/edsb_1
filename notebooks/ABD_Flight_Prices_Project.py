@@ -270,8 +270,8 @@ print("Rows after:", flights_noDup.count())
 # MAGIC - **searchDate:** `to_date` to keep the consistency beetween dates
 # MAGIC - **flightDate:** `to_date` to keep the consistency beetween dates
 # MAGIC - **totalFare:** `double` to consider the decimal part of the fare
-# MAGIC - **totalTravelDistance:** `int` to consider the distance with a int value
-# MAGIC - **seatsReamining:** `int` to consider th number of seats available
+# MAGIC - **totalTravelDistance:** `int` to consider the distance with a integer value
+# MAGIC - **seatsReamining:** `int` to consider the number of seats available
 # MAGIC - **isNonStop:** `boolean` to consider if it's a direct flight or not
 # MAGIC - **isBasicEconomy:** `boolean` if it's Basic Economy seat or not
 # MAGIC - **ingestion_date:** Feature created in the bronze layer, with the date and time when each row was loaded into our volume
