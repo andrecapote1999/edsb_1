@@ -162,6 +162,10 @@ spark.sql(f"DESCRIBE SCHEMA EXTENDED {CATALOG}.{SCHEMA}").show(truncate=False)
 
 # COMMAND ----------
 
+
+
+# COMMAND ----------
+
 # Pipeline log: every table written by the notebook is registered here (shown in section 10)
 pipeline_log = []
 
