@@ -88,10 +88,22 @@
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC
+# MAGIC First we create the schema `flights`, where all our tables will be saved, and the volume `lakehouse`, where we keep our files (source files, bronze layer and streaming files).
+# MAGIC  
+
+# COMMAND ----------
+
 # MAGIC %sql
 # MAGIC -- Create the schema for our tables and the volume for our files
 # MAGIC CREATE SCHEMA IF NOT EXISTS workspace.flights COMMENT 'ABD project - flight prices';
 # MAGIC CREATE VOLUME IF NOT EXISTS workspace.flights.lakehouse COMMENT 'Files for the ABD project';
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Import the Spark functions we need (aggregations, window functions, data types) and some Python libraries used to generate the streaming files.
 
 # COMMAND ----------
 
@@ -107,6 +119,15 @@ import uuid
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC We save the paths of our folders in variables, so we don't have to write them every time. Our Data Lake has 4 folders inside the volume:
+# MAGIC * **bronze** - the bronze layer (Delta files)
+# MAGIC * **checkpoints** - used by the streaming to remember which files were already read 
+# MAGIC * **landing** - the original files we uploaded
+# MAGIC * **stream_input** - where the new prices arrive for the streaming
+
+# COMMAND ----------
+
 # Path variables for the folders of our Data Lake (all inside the volume)
 
 base_path = "/Volumes/workspace/flights/lakehouse"
@@ -115,13 +136,15 @@ bronze_path = base_path + "/bronze"              # bronze layer
 stream_path = base_path + "/stream_input"        # folder read by the streaming query
 checkpoint_path = base_path + "/checkpoints"     # checkpoints of the streaming query
 
-dbutils.fs.mkdirs(landing_path)
-dbutils.fs.mkdirs(bronze_path)
-dbutils.fs.mkdirs(stream_path)
+# Create the folder inside the volume of the flights schema (If not exists)
+dbutils.fs.mkdirs(landing_path) # Landings
+dbutils.fs.mkdirs(bronze_path)  # Bronze
+dbutils.fs.mkdirs(stream_path)  # Stream
 
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC # Upload Files
 # MAGIC Upload the 3 files to the landing folder (Catalog > workspace > flights > lakehouse > landing > Upload to this volume)
 # MAGIC and check that they are there:
 
@@ -133,7 +156,16 @@ display(dbutils.fs.ls(landing_path))
 
 # MAGIC %md
 # MAGIC # 4. Bronze layer
-# MAGIC Here we only apply data rules: correct data types, remove nulls and duplicates.
+# MAGIC In the Bronze layer we only apply data rules, we don't change the meaning of the data:
+# MAGIC * correct data types
+# MAGIC * remove rows with missing values in the important columns
+# MAGIC * remove duplicates
+# MAGIC The result is saved as Delta files in the `bronze` folder. Delta adds ACID transactions, version history and time travel to the Parquet format.
+# MAGIC
+# MAGIC With a structure, where will be created inside the volume, parquets Partioned per date:
+# MAGIC * Flight Prices 
+# MAGIC * Airports 
+# MAGIC * Review
 
 # COMMAND ----------
 
@@ -142,8 +174,13 @@ display(dbutils.fs.ls(landing_path))
 
 # COMMAND ----------
 
-# Read the csv file (we don't use inferSchema, we change the data types ourselves later)
+# MAGIC %md
+# MAGIC The primary goal of this phase is to load the raw flight itineraries dataset to filter remove rows or duplicates and correct the data
+# MAGIC
 
+# COMMAND ----------
+
+# Read the csv file 
 flights_raw = spark.read.option("header", True).csv(landing_path + "/itineraries_sample.csv")
 
 print("Number of rows:", flights_raw.count())
@@ -155,16 +192,48 @@ display(flights_raw.limit(5))
 
 # COMMAND ----------
 
-# Check for nulls in the most important columns
+# MAGIC %md
+# MAGIC ### 4.1.1 Check for Nulls
 
+# COMMAND ----------
+
+# Check for nulls in the most important columns
 flights_raw.select([count(when(isnull(c), True)).alias(c)
                     for c in ["legId", "searchDate", "flightDate", "startingAirport", "destinationAirport", "totalFare"]]).show()
 
 # COMMAND ----------
 
-# Drop the rows without date, airports or price
+# MAGIC %md
+# MAGIC **Observations:**
+
+# COMMAND ----------
+
+# Check for rows with missing values in the important columns
+
+important_cols = ["searchDate", "flightDate", "startingAirport", "destinationAirport", "totalFare"]
+
+rows_with_nulls = flights_raw.filter(
+    col("searchDate").isNull()|
+    col("flightDate").isNull()|
+    col("startingAirport").isNull()|
+    col("destinationAirport").isNull()|
+    col("totalFare").isNull()
+)
+
+print("Total rows:", flights_raw.count())
+print("Rows with at least one null in the important columns:", rows_with_nulls.count())
+display(rows_with_nulls)
+
+# COMMAND ----------
 
 flights_noNull = flights_raw.dropna(subset=["searchDate", "flightDate", "startingAirport", "destinationAirport", "totalFare"])
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 4.1.2 Check for Duplicates
+
+# COMMAND ----------
 
 # Drop duplicates (same flight, same search day and same price)
 flights_noDup = flights_noNull.dropDuplicates(["legId", "searchDate", "totalFare"])
@@ -179,7 +248,7 @@ print("Rows after:", flights_noDup.count())
 flights_bz = flights_noDup \
     .withColumn("searchDate", to_date("searchDate")) \
     .withColumn("flightDate", to_date("flightDate")) \
-    .withColumn("totalFare", col("totalFare").cast("double")) \
+    .withColumn("totalFare", col("totalFare").cast("double")) \ # Porque double e não int
     .withColumn("totalTravelDistance", col("totalTravelDistance").cast("int")) \
     .withColumn("seatsRemaining", col("seatsRemaining").cast("int")) \
     .withColumn("isNonStop", col("isNonStop").cast("boolean")) \
