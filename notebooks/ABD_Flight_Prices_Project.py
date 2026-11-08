@@ -1,11 +1,19 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "6"
+# ///
 # MAGIC %md
 # MAGIC # ABD Project - Flight Prices
 # MAGIC
 # MAGIC Analysing Big Data 2026/2027 - NOVA IMS
 # MAGIC
-# MAGIC Group: [number] <br>
-# MAGIC Members: [name, student number], [name, student number], [name, student number], [name, student number], [name, student number]
+# MAGIC **Members:** 
+# MAGIC - André Capote, 20251637
+# MAGIC - Joana Alves, 20251641
+# MAGIC - João Gonçalves, 20210781
+# MAGIC - Paulo Amaro, 20251643
+# MAGIC - Tomás Ramos, 20251625
 
 # COMMAND ----------
 
@@ -17,7 +25,9 @@
 # MAGIC which route or airline is cheaper, and is the price I'm seeing now a good deal?
 # MAGIC
 # MAGIC The Skyscanner API is only available for commercial partners, so we used a public dataset from Kaggle with real flight
-# MAGIC prices collected from Expedia (another flight search website). The full dataset has around 80 million rows (30 GB),
+# MAGIC prices collected from Expedia (**Link:** https://www.kaggle.com/datasets/dilwong/flightprices)
+# MAGIC
+# MAGIC The full dataset has around 80 million rows (30 GB),
 # MAGIC which is too big for Databricks Free Edition, so we worked with a 1% random sample.
 # MAGIC
 # MAGIC **Our questions:**
