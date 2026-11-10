@@ -606,7 +606,11 @@ display(spark.table("flights.sv_flights").limit(5))
 
 # MAGIC %md
 # MAGIC # 6. Gold layer
-# MAGIC One table for each question.
+# MAGIC In the Gold layer we aggregate the Silver data to answer our questions. Each Gold table is small, answers one question and is ready to be queried with SQL.
+# MAGIC * `gd_booking_window` - Question 1: price by booking window
+# MAGIC * `gd_routes` - Question 2: cheapest routes from each airport
+# MAGIC * `gd_airline_weekday` - Question 2: price by airline and day of the week
+# MAGIC * `gd_route_avg` - average price per route, used later by the streaming (Question 3)
 
 # COMMAND ----------
 
@@ -616,6 +620,7 @@ sv = spark.table("flights.sv_flights")
 
 # MAGIC %md
 # MAGIC ## 6.1 Question 1: how many days in advance should we buy?
+# MAGIC We group the prices by booking window (0-7 days, 8-14 days, ...) and calculate the number of prices, the average price and the minimum price of each group.
 
 # COMMAND ----------
 
@@ -635,7 +640,18 @@ gd_booking_window.write.format("delta").mode("overwrite").saveAsTable("flights.g
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC **Answer to Question 1:** buying 31 - 60 days in advance is the cheapest option, with an average price of $328.84.
+# MAGIC Last-minute flights 0-7 days are the most expensive, with an average of $370.13, 12.6% more. So, for a traveller, booking 1 to 2 months before the flight saves on average around $41 per ticket compared to buying in the last week.
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 6.2 Question 2: cheapest routes, airlines and days
+# MAGIC ### Cheapest routes from each airport
+# MAGIC We calculate the average price and the percentage of direct flights for each route, and we rank the routes from each airport from the cheapest to the most expensive.
+# MAGIC We only keep routes with at least 30 prices, so the average is reliable.
+# MAGIC To create the ranking we use a **window function**: it calculates the rank inside each group of rows (here, each origin airport) without merging the rows.
 
 # COMMAND ----------
 
@@ -663,19 +679,54 @@ gd_routes.write.format("delta").mode("overwrite").saveAsTable("flights.gd_routes
 
 # COMMAND ----------
 
-# Average price per airline and day of the week (pivot)
+# MAGIC %md
+# MAGIC **Answer to Question 2 (routes):**
+# MAGIC * **New York (LGA) is the cheapest destination from 7 of the 16 airports** (ATL, BOS, CLT, DFW, DTW, MIA, ORD). It is the market with more flights and more competition between airlines.
+# MAGIC * **The cheapest routes are short and frequent**, like LGA-BOS ($138.62, the cheapest route) and LAX-SFO ($181.73). These routes also have many direct flights (70-80%).
+# MAGIC * **Oakland (OAK) is the exception:** even its cheapest destination (LAX, $321.40) costs more than twice LGA-BOS, and almost all trips have stops (0% to 14% direct flights).
+# MAGIC
+# MAGIC So a cheap route is not one with more stops: the cheapest routes have many direct flights, and the most expensive (from Oakland) have almost none. However, the cheapest routes are also the shortest, so distance probably explains part of the price.
 
-gd_airline_weekday = sv.groupBy("airline") \
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ### Cheapest airlines and days of the week
+# MAGIC We calculate the average price for each airline and day of the week. We use **pivot** to turn the days of the week into columns, so we can compare airlines and days in one table (like a pivot table in Excel).
+# MAGIC As with the routes, we only keep airlines with at least 30 prices, so the averages are reliable.
+
+# COMMAND ----------
+
+# Average price per airline and day of the week (pivot)
+# We only keep airlines with at least 30 prices, so the averages are reliable
+
+airlines_30 = sv.groupBy("airline").count().where(col("count") >= 30).select("airline")
+
+gd_airline_weekday = sv.join(airlines_30, "airline") \
+    .groupBy("airline") \
     .pivot("weekday", ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]) \
     .agg(round(avg("totalFare"), 2))
 
 gd_airline_weekday.write.format("delta").mode("overwrite").saveAsTable("flights.gd_airline_weekday")
-display(spark.table("flights.gd_airline_weekday"))
+display(spark.table("flights.gd_airline_weekday").orderBy("Tue"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC **Answer to Question 2 (airlines and days):**
+# MAGIC * **Tuesday is the cheapest day** for almost all airlines, and **Sunday is the most expensive**. For example, a Delta flight costs on average $339.31 on Tuesday and $459.76 on Sunday (35% more).
+# MAGIC * **The low-cost airlines are the cheapest:** Spirit and Frontier have an average price around $200, and Frontier on Tuesday has the lowest price of the table ($162.25).
+# MAGIC * **Among the big airlines, Delta is the most expensive** (around $393 on average), followed by United and American.
+# MAGIC
+# MAGIC For a traveller: flying on Tuesday with a low-cost airline is the cheapest option, and flying on Sunday is the most expensive.
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 6.3 Average price per route (used later by the streaming)
+# MAGIC This table is not an answer by itself: it is the "reference price" of each route. In the streaming part (Question 3), every new price that arrives is compared with this average to decide if it is a deal.
+# MAGIC We only keep routes with at least 30 prices, so the reference is reliable.
 
 # COMMAND ----------
 
@@ -689,9 +740,24 @@ gd_route_avg.orderBy(desc("n_prices")).show(10)
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC %md
+# MAGIC We have the average price of each route. The routes with more prices are the long ones between the big cities on the east and west coasts (ex: ATL-LAX with 7 103 prices, average $368.82), and these will be used to generate the new prices in the streaming.
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC # 7. Reviews (Question 4)
-# MAGIC We used the Word Count from class to see the most common words in the reviews,
-# MAGIC and then we checked how many reviews talk about problems (delays, lost bags, refunds...).
+# MAGIC The reviews are our unstructured data: free text written by passengers. Spark can't "read" text like we do, so we turn the text into numbers:
+# MAGIC * **7.1** - Word Count: the most common words in the reviews
+# MAGIC * **7.2** - we mark the reviews that talk about problems (delays, lost bags, refunds...) and calculate the % of complaints per airline
+# MAGIC * **7.3** - we join the complaints with the average price of each airline (structured data) to answer Question 4
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 7.1 Most common words in the reviews
+# MAGIC We use the Word Count algorithm from class: we clean the text (lower case and no punctuation), split it into words, remove the common words without meaning (stop words, like "the" or "and") and count how many times each word appears.
 
 # COMMAND ----------
 
@@ -700,7 +766,10 @@ reviews = spark.read.format("delta").load(bronze_path + "/reviews")
 # Clean the text (lower case, remove punctuation), split in words and count
 stop_words = ["the", "and", "was", "were", "for", "that", "with", "this", "they", "but", "not", "had",
               "have", "from", "our", "you", "are", "flight", "airline", "very", "there", "would", "their",
-              "when", "all", "after", "been", "one", "out", "get", "got", "did", "has", "verified", "trip"]
+              "when", "all", "after", "been", "one", "out", "get", "got", "did", "has", "verified", "trip",
+              "only", "which", "them", "will", "again", "even", "flights", "plane", "air", "airlines",
+              "could", "just", "more", "than", "then", "also", "about", "what", "into", "back", "told",
+              "said", "over", "because", "were", "who", "she", "her", "his", "him", "can", "way"]
 
 words = reviews.select(explode(split(regexp_replace(lower("review"), "[^a-z ]", " "), " ")).alias("word")) \
     .where(length("word") > 2) \
@@ -710,28 +779,57 @@ words.groupBy("word").count().orderBy(desc("count")).show(20)
 
 # COMMAND ----------
 
-# Mark the reviews that mention a problem
+# MAGIC %md
+# MAGIC After removing the stop words, the most common words are **service**, **time**, **airport**, **staff** and **check** (check-in). Passengers talk mostly about:
+# MAGIC * **the service and the staff** (service, staff, crew, customer)
+# MAGIC * **time and waiting** (time, hours), which suggests delays are a common topic
+# MAGIC * **the airport experience** (airport, check-in, luggage)
+# MAGIC * **comfort on board** (seat, seats, cabin, food)
+# MAGIC
+# MAGIC The word **never** is also very common, which usually appears in negative reviews ("never again", "never fly with them").
+# MAGIC We removed common words without meaning (stop words) like "the", "which" or "flight", because they appear in almost every review.
 
-problems = "delay|delayed|cancel|cancelled|lost|refund|rude|late|dirty|worst|terrible"
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 7.2 Reviews with complaints
+# MAGIC We mark a review as a complaint if it mentions a typical problem: delays, cancellations, lost bags, refunds, rude staff, etc.
+# MAGIC Then we calculate, for each airline, the percentage of reviews with complaints.
+
+# COMMAND ----------
+
+# Words that show a problem (\\b means "whole word", so "late" doesn't match words like "chocolate")
+problems = "\\b(delay|delayed|cancel|cancelled|lost|refund|rude|late|dirty|worst|terrible)\\b"
 
 reviews_problems = reviews \
     .withColumn("has_problem", lower("review").rlike(problems)) \
     .withColumn("airline_key", lower(split("airline", " ").getItem(0)))
 
-# The airline names are a bit different in the two datasets (ex: "Delta" and "Delta Air Lines"),
-# so we join them by the first word of the name
-
 complaints = reviews_problems.groupBy("airline_key") \
     .agg(count("*").alias("n_reviews"),
          round(avg(col("has_problem").cast("int")) * 100, 1).alias("pct_complaints"))
 
-prices = sv.withColumn("airline_key", lower(split("airline", " ").getItem(0))) \
-    .groupBy("airline_key") \
-    .agg(first("airline").alias("airline"), round(avg("totalFare"), 2).alias("avg_price"))
+complaints.orderBy(desc("n_reviews")).show(10)
 
-gd_complaints = prices.join(complaints, "airline_key")
+# COMMAND ----------
 
-gd_complaints.write.format("delta").mode("overwrite").saveAsTable("flights.gd_complaints")
+# MAGIC %md
+# MAGIC %md
+# MAGIC The reviews dataset has airlines from all over the world (AirAsia, Thai, Jetstar...), not only the US airlines from our flights data.
+# MAGIC Note: because we use the first word of the name, some different airlines are grouped together. For example, "air" groups Air France, Air Canada, Air India and others (2 448 reviews). This doesn't affect our answer, because none of the airlines in the flights data starts with "Air", but it is a limitation of this simple method.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 7.3 Complaints vs price (Question 4)
+# MAGIC Now we join the two types of data to answer Question 4:
+# MAGIC * **structured data**: the average price of each airline, calculated from the Silver table (`sv_flights`)
+# MAGIC * **unstructured data**: the percentage of reviews with complaints of each airline, from 7.2
+# MAGIC
+# MAGIC The airline names are a bit different in the two datasets (ex: "Delta" in the flights and "Delta Air Lines" in the reviews), so we join them by the first word of the name in lower case (`airline_key`).
+# MAGIC We use an inner join, so only the airlines that exist in both datasets remain.
 
 # COMMAND ----------
 
@@ -742,13 +840,39 @@ gd_complaints.write.format("delta").mode("overwrite").saveAsTable("flights.gd_co
 
 # COMMAND ----------
 
+# Correlation between the average price and the % of complaints (-1 to 1)
+correlation = spark.table("flights.gd_complaints").stat.corr("avg_price", "pct_complaints")
+print(f"Correlation between price and complaints: {correlation:.2f}")
+
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC **Answer to Question 4:**
+# MAGIC * The percentage of complaints is high for all airlines (between 69% and 92%), because people usually write reviews when something goes wrong.
+# MAGIC * There is a **slight tendency for cheaper airlines to have more complaints**: the correlation between price and complaints is -0.51. Frontier (low-cost) has 84% of reviews with complaints, while Delta, the most expensive of the big airlines, has the lowest value (69%).
+# MAGIC * **JetBlue is the exception:** it has a medium price ($267.62) but the highest percentage of complaints (92%), so price doesn't explain everything.
+# MAGIC
+# MAGIC **Limitation:** we only have 11 airlines and around 100 reviews per airline, so this is an indication and not a strong conclusion.
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC # 8. Streaming (Question 3)
-# MAGIC We simulate new prices arriving as JSON files in a folder (like the example from class 8).
-# MAGIC The streaming query reads the new files, compares each price with the average price of the route (Gold table)
-# MAGIC and marks it as a deal if it is 30% or more below the average.
+# MAGIC Until now we worked in **batch**: all the data was already in the file. With **streaming**, new data keeps arriving and Spark processes it as it arrives, which is what a website like Skyscanner needs when airlines send new prices.
 # MAGIC
-# MAGIC Note: in Databricks Free Edition we have to use `trigger(availableNow=True)`, so the query processes the new files and then stops.
+# MAGIC We don't have access to real-time prices, so we **simulate** new prices arriving as JSON files in a folder (like the example from class 8). The prices are based on the real routes and average prices of our Gold table.
+# MAGIC The streaming query reads the new files, compares each price with the average price of the route (`gd_route_avg`) and marks it as a **deal** if it is 30% or more below the average.
+# MAGIC
+# MAGIC Note: in Databricks Free Edition we have to use `trigger(availableNow=True)`, so the query processes the files that arrived and then stops.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 8.1 Prepare the folders
+# MAGIC We delete the files, the checkpoint and the table from previous runs, so the demo always starts from zero.
 
 # COMMAND ----------
 
@@ -758,6 +882,16 @@ dbutils.fs.rm(stream_path, True)
 dbutils.fs.rm(checkpoint_path, True)
 dbutils.fs.mkdirs(stream_path)
 spark.sql("DROP TABLE IF EXISTS flights.st_prices")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 8.2 Price generator (simulates the airlines)
+# MAGIC This function creates a JSON file with 20 new prices. For each price it picks one of the 30 routes with more data and uses the real average price of that route:
+# MAGIC * 80% of the prices are normal (between 80% and 130% of the average)
+# MAGIC * 20% of the prices are deals (between 40% and 70% of the average)
+# MAGIC This way we know that some deals will appear, and we can check if the streaming finds them.
 
 # COMMAND ----------
 
@@ -786,11 +920,26 @@ def new_prices_file(n=20):
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 8.3 The first prices arrive
+# MAGIC We call the function 3 times, so 3 files with 20 prices each (60 prices) arrive in the `stream_input` folder.
+
+# COMMAND ----------
+
 # 3 files arrive
 
 new_prices_file()
 new_prices_file()
 new_prices_file()
+display(dbutils.fs.ls(stream_path))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 8.4 Streaming query: source -> transformation -> sink
+# MAGIC **Source:** we tell Spark to read the JSON files of the `stream_input` folder as a stream. For file streams we have to give the schema (the columns and types of the files).
 
 # COMMAND ----------
 
@@ -807,6 +956,14 @@ prices_stream = spark.readStream.format("json").schema(prices_schema).load(strea
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC %md
+# MAGIC **Transformation:** we join each new price with the average price of its route (from the Gold table `gd_route_avg`) and calculate:
+# MAGIC * `pct_vs_avg` - how much the price is above or below the average (in %)
+# MAGIC * `is_deal` - True if the price is 30% or more below the average
+
+# COMMAND ----------
+
 # Transformation: join with the average price of each route and check if it is a deal
 
 route_avg = spark.table("flights.gd_route_avg").select("route", "avg_price")
@@ -816,6 +973,15 @@ deals_stream = prices_stream \
     .join(route_avg, "route", "left") \
     .withColumn("pct_vs_avg", round((col("price") / col("avg_price") - 1) * 100, 1)) \
     .withColumn("is_deal", col("price") <= col("avg_price") * 0.7)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC **Sink:** we write the results to a Delta table (`flights.st_prices`).
+# MAGIC * `checkpointLocation` - the checkpoint is the "memory" of the streaming: it saves which files were already read, so each file is processed only once
+# MAGIC * `outputMode("append")` - new rows are added to the table
+# MAGIC * `trigger(availableNow=True)` - process all the files that arrived and then stop
 
 # COMMAND ----------
 
@@ -831,6 +997,19 @@ query = deals_stream.writeStream \
 query.awaitTermination()
 
 print("Rows in the table:", spark.table("flights.st_prices").count())
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC The streaming read the 3 files and saved 60 prices in the table `st_prices`.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 8.5 Deals found
+# MAGIC The prices marked as deals (30% or more below the average of the route).
 
 # COMMAND ----------
 
