@@ -6,7 +6,7 @@
 # MAGIC %md
 # MAGIC # ABD Project - Flight Prices
 # MAGIC
-# MAGIC Analysing Big Data 2026/2027 - NOVA IMS
+# MAGIC Analysing Big Data 2026/2027 - NOVA IMS 
 # MAGIC
 # MAGIC **Members:** 
 # MAGIC - André Capote, 20251637
