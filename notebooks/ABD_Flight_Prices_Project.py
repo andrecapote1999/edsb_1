@@ -28,7 +28,7 @@
 # MAGIC prices collected from Expedia (**Link:** https://www.kaggle.com/datasets/dilwong/flightprices)
 # MAGIC
 # MAGIC The full dataset has around 80 million rows (30 GB),
-# MAGIC which is too big for Databricks Free Edition, so we worked with a 1% random sample. Later explanation at (**Section 2.**)
+# MAGIC which is too big for Databricks Free Edition, so we worked with a 1% random sample. (**See Section 2**)
 # MAGIC
 # MAGIC **Our questions:** 
 # MAGIC 1. How many days in advance should we buy to get a cheaper flight?
@@ -63,7 +63,7 @@
 # MAGIC * from each chunk we kept 1% of the rows at random (`sample(frac=0.01, random_state=42)`);
 # MAGIC * taking a bit from every chunk keeps all the routes and all the dates in the sample;
 # MAGIC * `random_state=42` makes the sample reproducible (running it again gives the same rows).
-# MAGIC The result was a file with around [X] rows (~[X] MB), which we uploaded to our volume. <br>
+# MAGIC The result was a file with around 821388 rows (~ 30 MB), which we uploaded to our volume. <br>
 # MAGIC # Prencher ISTO
 # MAGIC Kaggle notebook: *ABD - Flight Prices Sampling* ([link])
 # MAGIC The Spark code in this notebook doesn't depend on the size of the data: with a bigger cluster, the same code would run on the full file.
@@ -73,7 +73,7 @@
 # MAGIC We followed the Medallion architecture from class, saving all the data in Delta format:
 # MAGIC
 # MAGIC * **Bronze** - the source files with data rules applied (data types, nulls and duplicates). Saved as Delta files in the volume.
-# MAGIC * **Silver** - business rules: new columns (route, days in advance, day of the week, airline) and join with the airports(**PERCEBER QUAL A TABELA E COMO FAZ JOIN**). Saved as a table.
+# MAGIC * **Silver** - business rules: new columns (route, days in advance, day of the week, airline) and join with the airports table, using the airport code (IATA), to get the origin and destination city names (**PERCEBER QUAL A TABELA E COMO FAZ JOIN**). Saved as a table.
 # MAGIC * **Gold** - aggregated tables, one for each question, ready to be queried with SQL.
 # MAGIC * **Streaming** - new prices are read as they arrive, compared with the Gold table and saved in a Delta table. The best price per route is kept updated with MERGE. (**DAR CHECK NESTA PARTE**)
 # MAGIC  
@@ -124,7 +124,7 @@ import uuid
 # MAGIC * **bronze** - the bronze layer (Delta files)
 # MAGIC * **checkpoints** - used by the streaming to remember which files were already read 
 # MAGIC * **landing** - the original files we uploaded
-# MAGIC * **stream_input** - where the new prices arrive for the streaming
+# MAGIC * **stream_input** - created automatically by the streaming
 
 # COMMAND ----------
 
@@ -144,8 +144,8 @@ dbutils.fs.mkdirs(stream_path)  # Stream
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # Upload Files
-# MAGIC Upload the 3 files to the landing folder (Catalog > workspace > flights > lakehouse > landing > Upload to this volume)
+# MAGIC ### Upload Files
+# MAGIC We upload the 3 files to the landing folder (Catalog > workspace > flights > lakehouse > landing > Upload)
 # MAGIC and check that they are there:
 
 # COMMAND ----------
@@ -160,23 +160,19 @@ display(dbutils.fs.ls(landing_path))
 # MAGIC * correct data types
 # MAGIC * remove rows with missing values in the important columns
 # MAGIC * remove duplicates
-# MAGIC The result is saved as Delta files in the `bronze` folder. Delta adds ACID transactions, version history and time travel to the Parquet format.
 # MAGIC
-# MAGIC With a structure, where will be created inside the volume, parquets Partioned per date:
-# MAGIC * Flight Prices 
-# MAGIC * Airports 
-# MAGIC * Review
+# MAGIC We read the original files from the `landing` folder (they stay there unchanged) and save the clean data as Delta files in the `bronze` folder of our volume:
+# MAGIC * `bronze/flights` - flight prices, partitioned by search date (one folder per day)
+# MAGIC * `bronze/airports` - airports
+# MAGIC * `bronze/reviews` - passenger reviews
+# MAGIC
+# MAGIC Delta adds a transaction log to the Parquet files, which gives us version history and time travel.
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4.1 Flight prices
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC The primary goal of this phase is to load the raw flight itineraries dataset to filter remove rows or duplicates and correct the data
-# MAGIC
+# MAGIC We load the flight prices file, check for missing values and duplicates, and correct the data types (if necessary).
 
 # COMMAND ----------
 
@@ -188,93 +184,103 @@ flights_raw.printSchema()
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC %md
+# MAGIC The file has 821388 rows and 27 columns. All columns are read as `string` because a CSV file is just text, so we will correct the data types later (See Section 4.1.3)
+
+# COMMAND ----------
+
 display(flights_raw.limit(5)) 
 
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC %md
+# MAGIC Each row is one flight price found in a search: when it was searched (`searchDate`), the flight date (`flightDate`), the airports, the airline and the price (`totalFare`).
+# MAGIC Some columns have more than one value separated by `||` (ex: `segmentsAirlineName`), because a flight with stops has one value for each part of the trip.
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ### 4.1.1 Check for Nulls
+# MAGIC
+# MAGIC Check if there are null values in the most important columns: flight id, search date, flight date, airports and price (without those, a row is not useful for our analysis)
+
+# COMMAND ----------
+
+# Check for nulls: count the null values in each of the important columns
+important_cols = ["legId", "searchDate", "flightDate", "startingAirport", "destinationAirport", "totalFare"]
+
+nulls = flights_raw.select([count(when(isnull(c), True)).alias(c) for c in important_cols])
+
+display(nulls)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Check how many null values we have in the most important columns (without date, airports or price, a row is not useful for our analysis).
-
-# COMMAND ----------
-
-# Check for nulls in the most important columns
-flights_raw.select([count(when(isnull(c), True)).alias(c)
-                    for c in ["legId", "searchDate", "flightDate", "startingAirport", "destinationAirport", "totalFare"]]).show()
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC There are no null values in the most important columns, so the data is already clean here.
+# MAGIC There are no null values in the most important columns.
+# MAGIC We would remove the rows with nulls in these columns because without them a row is useless for our questions: we can't calculate the price, the days in advance or the route.
+# MAGIC We don't fill the missing values (for example with the average), because inventing prices or dates would change our results.
+# MAGIC The other columns (like `totalTravelDistance`) can have nulls, but we keep these rows because the price and the route are still valid.
 # MAGIC We keep the `dropna` anyway as a data rule: if new files arrive with missing values in the future, the pipeline will remove them automatically.
 
 # COMMAND ----------
 
-# Check for rows with missing values in the important columns
+# Remove rows with nulls in the important columns
+flights_noNull = flights_raw.dropna(subset=important_cols)
 
-important_cols = ["searchDate", "flightDate", "startingAirport", "destinationAirport", "totalFare"]
-
-rows_with_nulls = flights_raw.filter(
-    col("searchDate").isNull()|
-    col("flightDate").isNull()|
-    col("startingAirport").isNull()|
-    col("destinationAirport").isNull()|
-    col("totalFare").isNull()
-)
-
-print("Total rows:", flights_raw.count())
-print("Rows with at least one null in the important columns:", rows_with_nulls.count())
-display(rows_with_nulls)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC We remove the rows with null values in the most important columns: search date, flight date, airports and price.
-# MAGIC Without these columns a row is useless for our questions: we can't calculate the price, the days in advance or the route.
-# MAGIC We don't fill the missing values (for example with the average), because inventing prices or dates would change our results.
-# MAGIC The other columns (like `totalTravelDistance`) can have nulls, but we keep these rows because the price and the route are still valid.
-
-# COMMAND ----------
-
-# Remove rows with null values
-flights_noNull = flights_raw.dropna(subset=["searchDate", "flightDate", "startingAirport", "destinationAirport", "totalFare"])
+print("Rows before:", flights_raw.count())
+print("Rows after:", flights_noNull.count())
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ### 4.1.2 Check for Duplicates
+# MAGIC
+# MAGIC Check if there are duplicated rows. We consider a duplicate the same flight (`legId`), searched on the same day (`searchDate`) with the same price (`totalFare`).
+
+# COMMAND ----------
+
+# Check for duplicates: group by the 3 columns and keep the groups that appear more than once
+duplicates = flights_noNull.groupBy("legId", "searchDate", "totalFare").count().where(col("count") > 1)
+
+print("Number of duplicated rows:", duplicates.count())
+display(duplicates)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC We remove the duplicated rows, because the same price counted twice would give more weight to some flights and change the averages.
-# MAGIC We consider a duplicate the same flight (`legId`), searched on the same day (`searchDate`) with the same price (`totalFare`).
-# MAGIC We don't compare all the columns because two rows with these 3 columns equal are the same information.
+# MAGIC %md
+# MAGIC There are no duplicated rows in the data.
+# MAGIC We would remove the duplicates because the same price counted twice would give more weight to some flights and change the averages.
+# MAGIC We keep the `dropDuplicates` anyway as a data rule: if new files arrive with duplicates in the future, the pipeline will remove them automatically.
 
 # COMMAND ----------
 
-# Drop duplicates (same flight, same search day and same price)
+# Remove duplicates (same flight, same search day and same price)
 flights_noDup = flights_noNull.dropDuplicates(["legId", "searchDate", "totalFare"])
 
-print("Rows before:", flights_raw.count())
+print("Rows before:", flights_noNull.count())
 print("Rows after:", flights_noDup.count())
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC We have changed the data types for the following features:
-# MAGIC - **searchDate:** `to_date` to keep the consistency beetween dates
-# MAGIC - **flightDate:** `to_date` to keep the consistency beetween dates
-# MAGIC - **totalFare:** `double` to consider the decimal part of the fare
-# MAGIC - **totalTravelDistance:** `int` to consider the distance with a integer value
-# MAGIC - **seatsReamining:** `int` to consider the number of seats available
-# MAGIC - **isNonStop:** `boolean` to consider if it's a direct flight or not
-# MAGIC - **isBasicEconomy:** `boolean` if it's Basic Economy seat or not
-# MAGIC - **ingestion_date:** Feature created in the bronze layer, with the date and time when each row was loaded into our volume
+# MAGIC ### 4.1.3 Correct the data types
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC All columns came as text (`string`), because a CSV file is just text. Spark can't calculate averages or differences between dates with text, so we convert the columns we need to the correct type:
+# MAGIC - **searchDate** and **flightDate**: `date`, so we can calculate the days between the search and the flight
+# MAGIC - **totalFare**: `double`, a number with decimals (the price)
+# MAGIC - **totalTravelDistance**: `int`, distance in miles (whole number)
+# MAGIC - **seatsRemaining**: `int`, number of seats available
+# MAGIC - **isNonStop**: `boolean`, if it's a direct flight (True/False)
+# MAGIC - **isBasicEconomy**: `boolean`, if it's a Basic Economy ticket (True/False)
+# MAGIC
+# MAGIC We also add a new column, **ingestion_date**, with the date and time when each row was loaded into our Data Lake.
+# MAGIC The other columns stay as text, because they are text (ex: airport codes) or we only use part of them later in the Silver layer.
 
 # COMMAND ----------
 
@@ -293,30 +299,70 @@ bronze_flights.printSchema()
 
 # COMMAND ----------
 
+# MAGIC
 # MAGIC %md
-# MAGIC **Save the Bronze layer**
-# MAGIC  
-# MAGIC We save the clean data in the bronze layer in Delta format, using "**partitionBy**" in search date (`searchDate`).
-# MAGIC With partitions, Spark creates one folder for each day. When we filter by date, it only reads the folders it needs instead of the whole file, which makes the queries faster when we have a lot of data.
+# MAGIC Now the dates are `date`, the price and distance are numbers and the yes/no columns are `boolean`, so Spark can calculate averages, differences between dates and percentages.
+# MAGIC `bronze_flights` is our final Bronze DataFrame: no nulls, no duplicates and with the correct data types.
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC JA: CONFIRMAR SE A INGESTION DATE É NECESSÁRIA
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+# MAGIC ### 4.1.4 Save the Bronze layer
+# MAGIC
+# MAGIC We save `bronze_flights` in the `bronze/flights` folder of our volume, in Delta format and partitioned by search date (`searchDate`).
+# MAGIC * **Delta**: Parquet files plus a transaction log (`_delta_log`), which keeps the history of every change and allows time travel.
+# MAGIC * **Partitions**: Spark creates one folder for each search day. When we filter by date, it only reads the folders it needs instead of all the data, which makes the queries faster when we have a lot of data.
+
+# COMMAND ----------
+
+# Save the Bronze data as Delta files, partitioned by search date
 bronze_flights.write.format("delta").mode("overwrite").partitionBy("searchDate").save(bronze_path + "/flights")
 
 # COMMAND ----------
 
+# MAGIC
 # MAGIC %md
-# MAGIC The **Bronze table** is saved in the **flights folder** as one folder per search day, and each folder has the Parquet files of that day.
-# MAGIC The `_delta_log/` folder has the transaction log, which is the history of every change to the table.
+# MAGIC Let's check the folders created in the Bronze layer:
 
 # COMMAND ----------
 
+# Check the folders created: one folder per search date (partitions) and the _delta_log folder
 display(dbutils.fs.ls(bronze_path + "/flights"))
 
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC %md
+# MAGIC Spark created one folder for each search date (`searchDate=2022-04-16`, `searchDate=2022-04-17`, ...), 171 partitions in total, and inside each folder are the Parquet files with the data of that day.
+# MAGIC The `_delta_log` folder is what makes this a Delta table: it keeps the history of all the changes made to the data.
+
+# COMMAND ----------
+
+# Read the Bronze data back to confirm it was saved correctly
+check_bronze = spark.read.format("delta").load(bronze_path + "/flights")
+print("Rows in the Bronze layer:", check_bronze.count())
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC The Bronze layer has 821 388 rows, the same number we had after cleaning (Section 4.1.2.), so all the data was saved correctly.
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## 4.2 Airports
+# MAGIC
+# MAGIC The flights data only has airport codes (ex: JFK), so we use the airports file from OpenFlights to get the city names. This is reference data: a small table that complements the big one.
+# MAGIC The file has no header, so we define the schema ourselves (column names and types). Missing values are written as `\N` in this file.
+# MAGIC We keep only the airports with an IATA code (the 3-letter code used in the flights data) and the columns we need.
 
 # COMMAND ----------
 
