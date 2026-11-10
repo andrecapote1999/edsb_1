@@ -482,7 +482,15 @@ reviews_bz.show(3, truncate=80)
 
 # MAGIC %md
 # MAGIC # 5. Silver layer
-# MAGIC Here we apply the business rules: new columns that we need for the analysis and the join with the airports.
+# MAGIC In the Silver layer we apply business rules: we create the new columns we need to answer our questions and we join the flights with the airports to get the city names.
+# MAGIC The result is saved as a table (`flights.sv_flights`), so it can be queried with SQL.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 5.1 Read the Bronze layer
+# MAGIC From now on we don't read the original files anymore: we read the clean data from the Bronze layer.
 
 # COMMAND ----------
 
@@ -491,12 +499,19 @@ airports = spark.read.format("delta").load(bronze_path + "/airports")
 
 # COMMAND ----------
 
-# New columns:
-# - route (ex: JFK-LAX)
-# - days between the search and the flight
-# - booking window (groups of days)
-# - day of the week of the flight
-# - main airline (the "segments" columns have one value per flight, separated by ||)
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 5.2 New business columns
+# MAGIC We create the columns we need for our questions:
+# MAGIC * **route** - origin and destination airport together (ex: JFK-LAX)
+# MAGIC * **days_in_advance** - days between the search and the flight
+# MAGIC * **booking_window** - the days in advance grouped (0-7 days, 8-14 days, ...), to compare prices by group (Question 1)
+# MAGIC * **weekday** - day of the week of the flight (Question 2)
+# MAGIC * **airline** - the main airline. The column `segmentsAirlineName` has one airline for each part of the trip, separated by `||` (ex: `Delta||Delta`), so we keep the first one
+
+# COMMAND ----------
+
+
 
 flights_sv = flights \
     .withColumn("route", concat_ws("-", "startingAirport", "destinationAirport")) \
@@ -508,6 +523,16 @@ flights_sv = flights \
                                  .otherwise("5. more than 60 days")) \
     .withColumn("weekday", date_format("flightDate", "E")) \
     .withColumn("airline", split("segmentsAirlineName", "\\|\\|").getItem(0))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 5.3 Join with the airports
+# MAGIC We join the flights with the airports table using the airport code (IATA), to get the origin and destination city names.
+# MAGIC We do the join twice: once for the origin airport and once for the destination airport.
+# MAGIC * **left join** - we keep all the flights, even if an airport is not found in the airports table
+# MAGIC * **broadcast** - the airports table is small, so Spark copies it to every worker. This way the big flights table doesn't need to move between machines, which makes the join much faster
 
 # COMMAND ----------
 
@@ -526,12 +551,39 @@ flights_sv = flights_sv \
 
 # COMMAND ----------
 
+# Check if all airports were found in the airports table
+print("Flights without origin city:", flights_sv.where(col("origin_city").isNull()).count())
+print("Flights without destination city:", flights_sv.where(col("destination_city").isNull()).count())
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC All flights got the origin and destination city names (0 flights without city), so all the airports in the flights data exist in the airports table.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 5.4 Save the Silver table
+# MAGIC We save the result as a Delta table in our schema (`flights.sv_flights`). Unlike the Bronze layer (files in a folder), the Silver layer is a table, so it can be queried directly with SQL.
+
+# COMMAND ----------
+
 # DBTITLE 1,Save as Silver table (schema overwrite)
 # Save as a Silver table
 
 flights_sv.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable("flights.sv_flights")
 
 display(spark.table("flights.sv_flights").limit(5))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC ## 5.5 Overview of the Silver table
+# MAGIC A quick summary of our data with SQL.
+# MAGIC
 
 # COMMAND ----------
 
@@ -543,6 +595,12 @@ display(spark.table("flights.sv_flights").limit(5))
 # MAGIC        MAX(searchDate) AS last_search,
 # MAGIC        ROUND(AVG(totalFare), 2) AS avg_price
 # MAGIC FROM flights.sv_flights
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC Our Silver table has 821388 prices for 234 routes and 14 airlines, searched between 2022-04-16 and 2022-10-05. The average price is $340.38.
 
 # COMMAND ----------
 
