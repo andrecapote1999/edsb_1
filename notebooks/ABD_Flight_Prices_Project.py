@@ -385,6 +385,10 @@ airports_schema = StructType([
     StructField("source", StringType())
 ])
 
+
+# COMMAND ----------
+
+# Read the file with our schema (\N means missing value in this file)
 airports_raw = spark.read.schema(airports_schema).option("nullValue", "\\N").csv(landing_path + "/airports.dat")
 
 # Keep only airports with an IATA code (ex: JFK, LIS) and the columns we need
@@ -392,34 +396,87 @@ airports_bz = airports_raw.where(col("iata").isNotNull()) \
     .dropDuplicates(["iata"]) \
     .select("iata", "name", "city", "country")
 
+# Save in the Bronze layer
 airports_bz.write.format("delta").mode("overwrite").save(bronze_path + "/airports")
+
+print("Airports in the file:", airports_raw.count())
+print("Airports with IATA code:", airports_bz.count())
 airports_bz.show(5)
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4.3 Reviews
+# MAGIC From 7698 airports in the file, we kept 6072 with an IATA code. We don't partition this table because it is small.
+# MAGIC In the Silver layer we will join it with the flights using the airport code.
 
 # COMMAND ----------
 
-# Reviews are free text with commas and line breaks, so we need multiLine
+# MAGIC %md
+# MAGIC ## 4.3 Reviews
+# MAGIC
+# MAGIC
+# MAGIC The reviews are our unstructured data: free text written by passengers about each airline.
+# MAGIC The text can have commas, quotes and line breaks inside, so we need two extra options to read it correctly:
+# MAGIC * `multiLine` - a review can have more than one line, and without it Spark would read each line as a different review
+# MAGIC * `escape` - some reviews have quotes inside the text
 
+# COMMAND ----------
+
+# Read the reviews (free text with commas, quotes and line breaks)
 reviews_raw = spark.read.option("header", True).option("multiLine", True).option("escape", '"') \
     .csv(landing_path + "/airline_reviews.csv")
 
+print("Number of reviews:", reviews_raw.count())
+print("Number of columns:", len(reviews_raw.columns))
 reviews_raw.printSchema()
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC The file has 23171 reviews and 20 columns. For our analysis we only need two of them: the airline name (`Airline Name`) and the review text (`Review`). %md
+# MAGIC
+# MAGIC So we keep only the airline and the review text, and apply the same data rules as before: remove reviews without airline or text, and remove duplicated reviews.
+
+# COMMAND ----------
+
 # DBTITLE 1,Bronze reviews (with schema overwrite)
-# Keep only the airline and the review text (change the column names if your file is different)
+# Keep only the airline and the review text, remove nulls and duplicates
 
 reviews_bz = reviews_raw.select(col("`Airline Name`").alias("airline"), col("Review").alias("review")) \
     .dropna() \
     .dropDuplicates()
 
 reviews_bz.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(bronze_path + "/reviews")
+
+print("Reviews before:", reviews_raw.count())
+print("Reviews after:", reviews_bz.count())
 reviews_bz.show(3, truncate=80)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC %md
+# MAGIC We went from 23171 to 23046 reviews after removing nulls and duplicates. The Bronze reviews have only two columns: `airline` and `review`.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Bronze layer summary
+# MAGIC After the Bronze layer, our volume looks like this. The original files stay unchanged in `landing`, and the clean data is saved as Delta files in `bronze`:
+# MAGIC
+# MAGIC     lakehouse/
+# MAGIC      ├── landing/                         <- original files (unchanged)
+# MAGIC      │    ├── itineraries_sample.csv
+# MAGIC      │    ├── airports.dat
+# MAGIC      │    └── airline_reviews.csv
+# MAGIC      └── bronze/                          <- clean data (Delta)
+# MAGIC           ├── flights/
+# MAGIC           │    ├── _delta_log/            <- history of changes
+# MAGIC           │    ├── searchDate=2022-04-16/ <- Parquet files of that day
+# MAGIC           │    ├── searchDate=2022-04-17/
+# MAGIC           │    └── ... (171 folders)
+# MAGIC           ├── airports/
+# MAGIC           └── reviews/
 
 # COMMAND ----------
 
