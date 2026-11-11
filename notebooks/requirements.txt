@@ -1,0 +1,19 @@
+# Telco Customer Churn - Retention Management (EDSB26 Group 2)
+# Python 3.10+ (tested with 3.13).
+# The notebook reproduces its saved results with both pandas 2.3 and pandas 3.0.
+
+# Data handling
+pandas>=2.2
+numpy>=1.26
+openpyxl>=3.1          # required by pandas.read_excel for the .xlsx source files
+
+# Statistics and machine learning
+scipy>=1.11
+scikit-learn>=1.4
+
+# Visualisation
+matplotlib>=3.8
+seaborn>=0.13
+
+# Running the notebook (VS Code / Jupyter kernel)
+ipykernel>=6.29
