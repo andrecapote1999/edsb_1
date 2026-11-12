@@ -1089,13 +1089,15 @@ spark.table("flights.st_prices").groupBy("route") \
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Now 3 more files arrive. We run the same streaming query again and only the new files are read (because of the checkpoint).
+# MAGIC We call the function 3 times, we run the same streaming query again and only the new files are read (because of the checkpoint).
 
 # COMMAND ----------
 
 new_prices_file()
 new_prices_file()
 new_prices_file()
+
+#Now there are 3 mores files in the directory in fights.st_prices
 
 query = deals_stream.writeStream \
     .format("delta") \
