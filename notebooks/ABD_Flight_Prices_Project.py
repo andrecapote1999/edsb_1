@@ -914,6 +914,7 @@ dbutils.fs.rm(stream_path, True)
 dbutils.fs.rm(checkpoint_path, True)
 dbutils.fs.mkdirs(stream_path)
 spark.sql("DROP TABLE IF EXISTS flights.st_prices")
+spark.sql("DROP TABLE IF EXISTS flights.gd_best_price")
 
 # COMMAND ----------
 
@@ -1090,6 +1091,9 @@ spark.table("flights.st_prices").groupBy("route") \
 
 # MAGIC %md
 # MAGIC We call the function 3 times, we run the same streaming query again and only the new files are read (because of the checkpoint).
+# MAGIC
+# MAGIC First simulation we create the new stream data:
+# MAGIC - When appears new data we Insert a new `route`,`best_price`, `time` inside the table `gd_best_price`
 
 # COMMAND ----------
 
@@ -1131,14 +1135,27 @@ spark.table("flights.st_prices").groupBy("route") \
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC After the second stream simulation we will consider a new View `new_best_prices`, and we will consider in our gd_best_price table the following changes (considering it has the 1st stream data):
+# MAGIC - We will `INSERT` a new row when there's no price to a certain route.
+# MAGIC - We will `UPDATE` replace a new price to a certain route that as a condition to understand if the price is lower than the new price will be the lowest to that route.
+# MAGIC - If that condition doesn't verify nothing happens. 
+
+# COMMAND ----------
+
 # MAGIC %sql
 # MAGIC -- History of the table (one version for each change)
 # MAGIC DESCRIBE HISTORY flights.gd_best_price
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Here we can see a history simulation of the table `gd_best_price` behaviour, as we execute the two streams of the notebook, to have a clear image of a real stream simulation.
+
+# COMMAND ----------
+
 # MAGIC %sql
-# MAGIC -- Time travel: compare the first MERGE (version 1) with the current version
+# MAGIC -- Comparison between the first MERGE (version 1) with the current version (2nd stream)
 # MAGIC SELECT a.route, b.best_price AS price_version_1, a.best_price AS price_now
 # MAGIC FROM flights.gd_best_price a
 # MAGIC LEFT JOIN flights.gd_best_price VERSION AS OF 1 b ON a.route = b.route
