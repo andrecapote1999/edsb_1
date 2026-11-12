@@ -64,7 +64,7 @@
 # MAGIC * taking a bit from every chunk keeps all the routes and all the dates in the sample;
 # MAGIC * `random_state=42` makes the sample reproducible (running it again gives the same rows).
 # MAGIC The result was a file with around 821388 rows (~ 30 MB), which we uploaded to our volume. <br>
-# MAGIC # Prencher ISTO
+# MAGIC # Preencher ISTO
 # MAGIC Kaggle notebook: *ABD - Flight Prices Sampling* ([link])
 # MAGIC The Spark code in this notebook doesn't depend on the size of the data: with a bigger cluster, the same code would run on the full file.
 # MAGIC  
@@ -662,17 +662,18 @@ window_origin = Window.partitionBy("startingAirport").orderBy("avg_price")
 gd_routes = sv.groupBy("route", "startingAirport", "destinationAirport", "destination_city") \
     .agg(count("*").alias("n_prices"),
          round(avg("totalFare"), 2).alias("avg_price"),
-         round(avg(col("isNonStop").cast("int")) * 100, 1).alias("pct_nonstop")) \
+         round(avg(col("isNonStop").cast("int")) * 100, 1).alias("pct_nonstop"),
+         round(avg("totalTravelDistance")).cast("int").alias("totalTravelDistance")) \
     .where(col("n_prices") >= 30) \
     .withColumn("rank", dense_rank().over(window_origin))
 
-gd_routes.write.format("delta").mode("overwrite").saveAsTable("flights.gd_routes")
+gd_routes.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable("flights.gd_routes")
 
 # COMMAND ----------
 
 # MAGIC %sql
 # MAGIC -- Top 3 cheapest destinations from each airport
-# MAGIC SELECT startingAirport, rank, destinationAirport, destination_city, avg_price, pct_nonstop
+# MAGIC SELECT startingAirport, rank, destinationAirport, destination_city, avg_price, pct_nonstop, totalTravelDistance
 # MAGIC FROM flights.gd_routes
 # MAGIC WHERE rank <= 3
 # MAGIC ORDER BY startingAirport, rank
@@ -684,6 +685,8 @@ gd_routes.write.format("delta").mode("overwrite").saveAsTable("flights.gd_routes
 # MAGIC * **New York (LGA) is the cheapest destination from 7 of the 16 airports** (ATL, BOS, CLT, DFW, DTW, MIA, ORD). It is the market with more flights and more competition between airlines.
 # MAGIC * **The cheapest routes are short and frequent**, like LGA-BOS ($138.62, the cheapest route) and LAX-SFO ($181.73). These routes also have many direct flights (70-80%).
 # MAGIC * **Oakland (OAK) is the exception:** even its cheapest destination (LAX, $321.40) costs more than twice LGA-BOS, and almost all trips have stops (0% to 14% direct flights).
+# MAGIC
+# MAGIC makes sense to add the totalTravelDistance?
 # MAGIC
 # MAGIC So a cheap route is not one with more stops: the cheapest routes have many direct flights, and the most expensive (from Oakland) have almost none. However, the cheapest routes are also the shortest, so distance probably explains part of the price.
 
@@ -715,7 +718,7 @@ display(spark.table("flights.gd_airline_weekday").orderBy("Tue"))
 # MAGIC %md
 # MAGIC %md
 # MAGIC **Answer to Question 2 (airlines and days):**
-# MAGIC * **Tuesday is the cheapest day** for almost all airlines, and **Sunday is the most expensive**. For example, a Delta flight costs on average $339.31 on Tuesday and $459.76 on Sunday (35% more).
+# MAGIC * **Tuesday is the cheapest day** for almost all airlines((only not in BoutiqueAir)), and **Sunday is the most expensive**(only not in CapeAir). For example, a Delta flight costs on average $339.31 on Tuesday and $459.76 on Sunday (35% more).
 # MAGIC * **The low-cost airlines are the cheapest:** Spirit and Frontier have an average price around $200, and Frontier on Tuesday has the lowest price of the table ($162.25).
 # MAGIC * **Among the big airlines, Delta is the most expensive** (around $393 on average), followed by United and American.
 # MAGIC
@@ -742,6 +745,8 @@ gd_route_avg.orderBy(desc("n_prices")).show(10)
 # MAGIC %md
 # MAGIC %md
 # MAGIC We have the average price of each route. The routes with more prices are the long ones between the big cities on the east and west coasts (ex: ATL-LAX with 7 103 prices, average $368.82), and these will be used to generate the new prices in the streaming.
+# MAGIC
+# MAGIC A curious fact is that LAX is present in all 10 top n_prices, which could probably mean that there is more flights for this destination or more flights departing from this airport.
 
 # COMMAND ----------
 
@@ -749,8 +754,8 @@ gd_route_avg.orderBy(desc("n_prices")).show(10)
 # MAGIC # 7. Reviews (Question 4)
 # MAGIC The reviews are our unstructured data: free text written by passengers. Spark can't "read" text like we do, so we turn the text into numbers:
 # MAGIC * **7.1** - Word Count: the most common words in the reviews
-# MAGIC * **7.2** - we mark the reviews that talk about problems (delays, lost bags, refunds...) and calculate the % of complaints per airline
-# MAGIC * **7.3** - we join the complaints with the average price of each airline (structured data) to answer Question 4
+# MAGIC * **7.2** - We mark the reviews that talk about problems (delays, lost bags, refunds...) and calculate the % of complaints per airline
+# MAGIC * **7.3** - We join the complaints with the average price of each airline (structured data) to answer Question 4
 
 # COMMAND ----------
 
@@ -792,32 +797,49 @@ words.groupBy("word").count().orderBy(desc("count")).show(20)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
+# MAGIC
 # MAGIC ## 7.2 Reviews with complaints
+# MAGIC
 # MAGIC We mark a review as a complaint if it mentions a typical problem: delays, cancellations, lost bags, refunds, rude staff, etc.
-# MAGIC Then we calculate, for each airline, the percentage of reviews with complaints.
+# MAGIC
+# MAGIC The reviews dataset has airlines from all over the world, so we keep only the airlines that also exist in our flights data. Then we calculate, for each airline, the percentage of reviews with complaints.
+# MAGIC  
 
 # COMMAND ----------
 
 # Words that show a problem (\\b means "whole word", so "late" doesn't match words like "chocolate")
 problems = "\\b(delay|delayed|cancel|cancelled|lost|refund|rude|late|dirty|worst|terrible)\\b"
-
+ 
 reviews_problems = reviews \
     .withColumn("has_problem", lower("review").rlike(problems)) \
     .withColumn("airline_key", lower(split("airline", " ").getItem(0)))
-
-complaints = reviews_problems.groupBy("airline_key") \
+ 
+# Airlines that exist in our flights data (first word of the name, in lower case)
+flight_airlines = sv.select(lower(split("airline", " ").getItem(0)).alias("airline_key")).distinct()
+ 
+# Keep only the reviews of these airlines (left_semi join) and calculate the % of complaints
+complaints = reviews_problems.join(flight_airlines, "airline_key", "left_semi") \
+    .groupBy("airline_key") \
     .agg(count("*").alias("n_reviews"),
          round(avg(col("has_problem").cast("int")) * 100, 1).alias("pct_complaints"))
-
-complaints.orderBy(desc("n_reviews")).show(10)
+ 
+complaints.orderBy(desc("pct_complaints")).show()
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC %md
-# MAGIC The reviews dataset has airlines from all over the world (AirAsia, Thai, Jetstar...), not only the US airlines from our flights data.
-# MAGIC Note: because we use the first word of the name, some different airlines are grouped together. For example, "air" groups Air France, Air Canada, Air India and others (2 448 reviews). This doesn't affect our answer, because none of the airlines in the flights data starts with "Air", but it is a limitation of this simple method.
+# MAGIC **Result (complaints per airline):**
+# MAGIC After the `left_semi` join, only the airlines that exist in the flights data remain, so mixed groups from the reviews data are no longer in the table.
+# MAGIC * **JetBlue has the highest percentage of complaints (86%)**, followed by Frontier (80%), United (74%) and Sun Country (73%).
+# MAGIC * **Alaska (57.6%), Cape Air (58.5%), Delta and Hawaiian (64%) have the fewest complaints.**
+# MAGIC * Delta is the most expensive of the big airlines (Question 2), but it is also one of the airlines with fewer complaints. The low-cost airlines (Frontier and Spirit) are cheap, but they have more complaints (80% and 69%).
+# MAGIC  
+# MAGIC **Limitations:**
+# MAGIC * Most airlines have only 100 reviews (American has 200), and Boutique Air (38) and Cape Air (41) have even fewer, so these percentages are less reliable.
+# MAGIC * The percentages are high for all airlines (all above 55%) because people usually write reviews after a bad experience.
+# MAGIC
+# MAGIC
 
 # COMMAND ----------
 
@@ -830,6 +852,18 @@ complaints.orderBy(desc("n_reviews")).show(10)
 # MAGIC
 # MAGIC The airline names are a bit different in the two datasets (ex: "Delta" in the flights and "Delta Air Lines" in the reviews), so we join them by the first word of the name in lower case (`airline_key`).
 # MAGIC We use an inner join, so only the airlines that exist in both datasets remain.
+
+# COMMAND ----------
+
+# Average price per airline (from the Silver table)
+prices = sv.withColumn("airline_key", lower(split("airline", " ").getItem(0))) \
+    .groupBy("airline_key") \
+    .agg(first("airline").alias("airline"), round(avg("totalFare"), 2).alias("avg_price"))
+ 
+# Join prices (structured data) with complaints (unstructured data, from 7.2)
+gd_complaints = prices.join(complaints, "airline_key")
+ 
+gd_complaints.write.format("delta").mode("overwrite").saveAsTable("flights.gd_complaints")
 
 # COMMAND ----------
 
@@ -850,9 +884,9 @@ print(f"Correlation between price and complaints: {correlation:.2f}")
 # MAGIC %md
 # MAGIC %md
 # MAGIC **Answer to Question 4:**
-# MAGIC * The percentage of complaints is high for all airlines (between 69% and 92%), because people usually write reviews when something goes wrong.
-# MAGIC * There is a **slight tendency for cheaper airlines to have more complaints**: the correlation between price and complaints is -0.51. Frontier (low-cost) has 84% of reviews with complaints, while Delta, the most expensive of the big airlines, has the lowest value (69%).
-# MAGIC * **JetBlue is the exception:** it has a medium price ($267.62) but the highest percentage of complaints (92%), so price doesn't explain everything.
+# MAGIC * The percentage of complaints is high for all airlines (between 69% and 86%), because people usually write reviews when something goes wrong.
+# MAGIC * There is a **slight tendency for cheaper airlines to have more complaints**: the correlation between price and complaints is -0.58. Frontier (low-cost) has 80% of reviews with complaints, while Delta, the most expensive of the big airlines, has the lowest value (64%).
+# MAGIC * **JetBlue is the exception:** it has a medium price ($267.62) but the highest percentage of complaints (86%), so price doesn't explain everything.
 # MAGIC
 # MAGIC **Limitation:** we only have 11 airlines and around 100 reviews per airline, so this is an indication and not a strong conclusion.
 
@@ -862,10 +896,8 @@ print(f"Correlation between price and complaints: {correlation:.2f}")
 # MAGIC # 8. Streaming (Question 3)
 # MAGIC Until now we worked in **batch**: all the data was already in the file. With **streaming**, new data keeps arriving and Spark processes it as it arrives, which is what a website like Skyscanner needs when airlines send new prices.
 # MAGIC
-# MAGIC We don't have access to real-time prices, so we **simulate** new prices arriving as JSON files in a folder (like the example from class 8). The prices are based on the real routes and average prices of our Gold table.
+# MAGIC We don't have access to real-time prices, so we **simulate** new prices arriving as JSON files in a folder. The prices are based on the real routes and average prices of our Gold table.
 # MAGIC The streaming query reads the new files, compares each price with the average price of the route (`gd_route_avg`) and marks it as a **deal** if it is 30% or more below the average.
-# MAGIC
-# MAGIC Note: in Databricks Free Edition we have to use `trigger(availableNow=True)`, so the query processes the files that arrived and then stops.
 
 # COMMAND ----------
 
@@ -909,7 +941,7 @@ def new_prices_file(n=20):
         else:
             price = r["avg_price"] * random.uniform(0.8, 1.3)    # normal price
         rows.append(json.dumps({
-            "id": str(uuid.uuid4()),
+            "id": str(),
             "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "route": r["route"],
             "price": float("%.2f" % price)
@@ -971,7 +1003,7 @@ route_avg = spark.table("flights.gd_route_avg").select("route", "avg_price")
 deals_stream = prices_stream \
     .withColumn("time", to_timestamp("time")) \
     .join(route_avg, "route", "left") \
-    .withColumn("pct_vs_avg", round((col("price") / col("avg_price") - 1) * 100, 1)) \
+    .withColumn("price_vs_avg", round((col("price") - col("avg_price")), 1)) \
     .withColumn("is_deal", col("price") <= col("avg_price") * 0.7)
 
 # COMMAND ----------
@@ -1015,10 +1047,10 @@ print("Rows in the table:", spark.table("flights.st_prices").count())
 
 # MAGIC %sql
 # MAGIC -- The deals found
-# MAGIC SELECT time, route, price, avg_price, pct_vs_avg
+# MAGIC SELECT time, route, price, avg_price, price_vs_avg
 # MAGIC FROM flights.st_prices
 # MAGIC WHERE is_deal
-# MAGIC ORDER BY pct_vs_avg
+# MAGIC ORDER BY price_vs_avg
 
 # COMMAND ----------
 
