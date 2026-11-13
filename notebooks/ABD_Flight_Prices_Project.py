@@ -882,7 +882,6 @@ print(f"Correlation between price and complaints: {correlation:.2f}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
 # MAGIC **Answer to Question 4:**
 # MAGIC * The percentage of complaints is high for all airlines (between 69% and 86%), because people usually write reviews when something goes wrong.
 # MAGIC * There is a **slight tendency for cheaper airlines to have more complaints**: the correlation between price and complaints is -0.58. Frontier (low-cost) has 80% of reviews with complaints, while Delta, the most expensive of the big airlines, has the lowest value (64%).
@@ -1170,14 +1169,28 @@ spark.table("flights.st_prices").groupBy("route") \
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC %md
 # MAGIC # 10. Conclusions
 # MAGIC
-# MAGIC *(write after running the notebook, with the real numbers)*
+# MAGIC **Main finding:** the price of a flight depends mostly on **when you buy it, when you fly and who you fly with**. Buying early, flying mid-week and choosing a low-cost airline can save a traveller a significant part of the ticket price. The route also matters, but its effect is partly explained by distance and competition.
 # MAGIC
-# MAGIC 1. **When to buy:** ...
-# MAGIC 2. **Cheapest routes, airlines and days:** ...
-# MAGIC 3. **Deals with streaming:** ...
-# MAGIC 4. **Complaints vs price:** ...
+# MAGIC ## What we learned
 # MAGIC
-# MAGIC **Limitations:** we used a 1% sample because of the limits of Databricks Free Edition (the code would be the same for the full dataset),
-# MAGIC the streaming data is simulated, and the data is only from US flights in 2022.
+# MAGIC * **Timing is the easiest way to save money.** Booking 1 to 2 months ahead is about 12% cheaper than buying in the last week, and Tuesday is cheaper than Sunday for almost every airline. Both effects are consistent, not isolated cases.
+# MAGIC * **Cheap routes are short, frequent and competitive.** The cheapest routes (e.g. LGA-BOS) have many direct flights, while the most expensive ones (from Oakland) have almost none. Distance was not analysed directly, so it probably explains part of this difference.
+# MAGIC * **Cheap does not mean better.** Low-cost airlines have the lowest prices but also more complaints (correlation of -0.58). `JetBlue` shows that price alone does not explain customer satisfaction.
+# MAGIC
+# MAGIC ## Practical recommendation
+# MAGIC
+# MAGIC **The cheapest combination in our data:** book 31-60 days ahead, fly on a Tuesday, choose a short and busy route (like LGA-BOS, $138.62 on average) and fly with a low-cost airline. Frontier on a Tuesday has the lowest average price of the table ($162.25), followed by `Spirit` ($169.82). On a Sunday the same airlines cost $257.16 and $243.09.
+# MAGIC
+# MAGIC * **Lowest price:** `Frontier` or `Spirit` (around $199 on average), but with more complaints.
+# MAGIC * **Balanced:** `American`, the cheapest of the big airlines ($309, vs $367 for `United` and $390 for `Delta`).
+# MAGIC * **Best service:** `Alaska` has the fewest complaints (58%), followed by `Delta` (64%), but both are more expensive.
+# MAGIC * **Worst value:** `JetBlue`, with a medium price ($268) and the highest percentage of complaints (86%).
+# MAGIC
+# MAGIC Whatever the airline, avoid last-minute tickets (around $41 more on average) and Sunday flights, and prefer short routes with direct flights.
+# MAGIC
+# MAGIC ## Limitations and next steps
+# MAGIC
+# MAGIC We used a 1% sample because of the limits of Databricks Free Edition, the streaming data is simulated, and the data is only from US flights in 2022. Next steps: use the full dataset, include travel distance in the route analysis, and connect the pipeline to a real price source.
