@@ -28,6 +28,7 @@
 # MAGIC 7. Reviews (Question 3)
 # MAGIC 8. Streaming (Question 4)
 # MAGIC 9. Conclusions
+# MAGIC 10. Big Data technologies used
 
 # COMMAND ----------
 
@@ -1033,4 +1034,37 @@ print("Rows in the table:", spark.table("flights.st_prices").count())
 # MAGIC * We used a 1% sample because of the limits of Databricks Free Edition; the code would be the same for the full dataset.
 # MAGIC * The flight data is only from US flights in 2022, and the streaming prices are simulated (based on the real average prices).
 # MAGIC * We have only around 100 reviews per airline, so the complaints analysis is only an indication.
+# MAGIC
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 10. Big Data technologies used
+# MAGIC
+# MAGIC ### 1. Platform and storage
+# MAGIC
+# MAGIC | Technology | Where it is used |
+# MAGIC |---|---|
+# MAGIC | **Databricks (Free Edition)** | Execution environment for the notebook (serverless compute). We use `dbutils` to manage files and folders. |
+# MAGIC | **Unity Catalog** (schema + volume) | Schema `workspace.flights` for the tables and volume `lakehouse` for the files. |
+# MAGIC | **Data Lake / Lakehouse** | Folders `landing`, `bronze`, `stream_input` and `checkpoints` inside the volume. |
+# MAGIC | **Delta Lake** | All layers are saved in Delta format, with the transaction log (`_delta_log`) that keeps the history of every change. We use `overwriteSchema` to replace tables when the schema changes. |
+# MAGIC | **Parquet** | File format underneath Delta. |
+# MAGIC | **Medallion architecture** | Bronze (cleaning and data types), Silver (business rules and airport join) and Gold (aggregated tables, one per question). |
+# MAGIC
+# MAGIC ### 2. Processing
+# MAGIC
+# MAGIC | Technology / technique | Where it is used |
+# MAGIC |---|---|
+# MAGIC | **Apache Spark (PySpark)** | DataFrame API for all the data transformations. |
+# MAGIC | **Spark SQL** | `%sql` cells to create the schema and volume and to query the Silver and Gold tables. |
+# MAGIC | **Spark Structured Streaming** | `readStream` from JSON files, stream-static join, `checkpointLocation`, `outputMode("append")`, `trigger(availableNow=True)` and `toTable`. |
+# MAGIC | **Partitioning** | `partitionBy("searchDate")`, creating 171 partitions in the Bronze layer. |
+# MAGIC | **Broadcast join** | Joins the small airports table with the large flights table without moving the large one across machines (no shuffle). |
+# MAGIC | **Left join and left_semi join** | The left join links flights and airports. The left_semi join keeps only the reviews of the airlines in the flights data. |
+# MAGIC | **Window functions** | `dense_rank()` per origin airport, to rank the cheapest routes. |
+# MAGIC | **Aggregations and pivot** | `groupBy`, `agg` and `pivot` by day of the week. |
+# MAGIC | **Word Count** | `split`, `explode` and stop-word removal, applied to the reviews. |
+# MAGIC | **Text processing with regex** | `regexp_replace` to clean the text and `rlike` to flag reviews with complaints. |
+# MAGIC | **Correlation** | `stat.corr` between the average price and the percentage of complaints. |
 # MAGIC
