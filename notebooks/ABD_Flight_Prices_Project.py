@@ -4,94 +4,100 @@
 # environment_version = "6"
 # ///
 # MAGIC %md
-# MAGIC # ABD Project - Flight Prices
+# MAGIC # Flight Prices: when, where and with whom to fly cheaper
+# MAGIC **Course:** Analysing Big Data 2026/2027 - NOVA IMS  
 # MAGIC
-# MAGIC Analysing Big Data 2026/2027 - NOVA IMS 
 # MAGIC
-# MAGIC **Members:** 
-# MAGIC - André Capote, 20251637
-# MAGIC - Joana Alves, 20251641
-# MAGIC - João Gonçalves, 20210781
-# MAGIC - Paulo Amaro, 20251643
-# MAGIC - Tomás Ramos, 20251625
+# MAGIC | Student | Number |
+# MAGIC |---|---|
+# MAGIC | André Capote | 20251637 |
+# MAGIC | Joana Alves | 20251641 |
+# MAGIC | João Gonçalves | 20210781 |
+# MAGIC | Paulo Amaro | 20251643 |
+# MAGIC | Tomás Ramos | 20251625 |
+# MAGIC
+# MAGIC **Summary:** we analysed 821 388 real flight prices (a sample of a Kaggle dataset from Expedia) to find out when and where it is cheaper to fly. We built a Medallion Lakehouse with Delta Lake, combined structured data (prices and airports), unstructured data (passenger reviews) and streaming data (new prices arriving), and used it to answer 4 questions about booking time, routes, airlines and complaints.
+# MAGIC
+# MAGIC **Contents:**
+# MAGIC 1. Problem and motivation
+# MAGIC 2. Data and architecture
+# MAGIC 3. Set-up the environment
+# MAGIC 4. Bronze layer
+# MAGIC 5. Silver layer
+# MAGIC 6. Gold layer (Questions 1 and 2)
+# MAGIC 7. Reviews (Question 3)
+# MAGIC 8. Streaming (Question 4)
+# MAGIC 9. Delta Lake: MERGE and time travel
+# MAGIC 10. Conclusions
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC # 1. Problem and motivation
 # MAGIC
-# MAGIC Websites like Skyscanner compare millions of flight prices every day. Prices change a lot depending on how early you buy,
-# MAGIC the route, the airline and the day of the week. As travellers, we always ask the same questions: when should I buy,
-# MAGIC which route or airline is cheaper, and is the price I'm seeing now a good deal?
+# MAGIC Websites like Skyscanner compare millions of flight prices every day. Prices change a lot depending on how early we buy, the route, the airline and the day of the week. As travellers, we always ask the same questions: **when should I buy, which route or airline is cheaper, and is the price I'm seeing now a good deal?**
+# MAGIC Answering these questions is useful for travellers, who want to save money, and for comparison websites, which want to show the best options to their users.
 # MAGIC
-# MAGIC The Skyscanner API is only available for commercial partners, so we used a public dataset from Kaggle with real flight
-# MAGIC prices collected from Expedia (**Link:** https://www.kaggle.com/datasets/dilwong/flightprices)
+# MAGIC This is a **Big Data** problem because it has:
+# MAGIC -  **Volume** | The full dataset has around 80 million flight prices (~30 GB) 
+# MAGIC -  **Velocity** | New prices keep arriving and must be evaluated as soon as they arrive 
+# MAGIC - **Variety** | Structured data (prices, airports), unstructured data (passenger reviews) and streaming data (new prices) 
 # MAGIC
-# MAGIC The full dataset has around 80 million rows (30 GB),
-# MAGIC which is too big for Databricks Free Edition, so we worked with a 1% random sample. (**See Section 2**)
+# MAGIC The Skyscanner API is only available for commercial partners, so we used a public dataset from Kaggle with real flight prices collected from Expedia ([link](https://www.kaggle.com/datasets/dilwong/flightprices)). The full dataset is too big for Databricks Free Edition, so we worked with a 1% random sample (see Section 2).
 # MAGIC
-# MAGIC **Our questions:** 
-# MAGIC 1. How many days in advance should we buy to get a cheaper flight?
-# MAGIC 2. Which routes and airlines are the cheapest, and on which days of the week?
-# MAGIC 3. Can we detect good deals as soon as new prices arrive? (streaming)
-# MAGIC 4. Do cheaper airlines get more complaints from passengers? (text reviews)
+# MAGIC **These are the questions we aimd to answer:**
 # MAGIC
-# MAGIC # REVER PERGUNTAS
+# MAGIC | # | Question | Data | Section |
+# MAGIC |---|---|---|---|
+# MAGIC | 1 | How many days in advance should we buy to get a cheaper flight? | Structured | 6.1 |
+# MAGIC | 2 | Which routes and airlines are the cheapest, and on which days of the week? | Structured | 6.2 |
+# MAGIC | 3 | Do cheaper airlines get more complaints from passengers? | Unstructured | 7 |
+# MAGIC | 4 | Can we detect good deals as soon as new prices arrive? | Streaming | 8 and 9 |
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC
 # MAGIC # 2. Data and architecture
-# MAGIC  
-# MAGIC ## Data sources
 # MAGIC
+# MAGIC ## Data sources
 # MAGIC We combined structured, unstructured and streaming data:
-# MAGIC  
+# MAGIC
 # MAGIC | File | Type | Source | What it has |
 # MAGIC |---|---|---|---|
 # MAGIC | `itineraries_sample.csv` | Structured | Kaggle - *dilwong/flightprices* | One row per flight price found in a search on Expedia (US flights, searched between April and October 2022): search date, flight date, airports, airline, price, non-stop or not... |
 # MAGIC | `airports.dat` | Structured (reference data) | OpenFlights | Airport code (ex: JFK), name, city and country |
 # MAGIC | `airline_reviews.csv` | Unstructured | Kaggle - airline reviews | Free text reviews written by passengers about each airline |
 # MAGIC | JSON files | Streaming | Generated by us in this notebook | New prices arriving in a folder, to simulate prices sent by airlines and travel agencies |
-# MAGIC  
+# MAGIC
 # MAGIC ## How we created the sample
-# MAGIC
-# MAGIC The original file (`itineraries.csv`) was too big to download and upload to
-# MAGIC Databricks Free Edition, so we created a sample in a Kaggle notebook (where the dataset is stored):
+# MAGIC The original file (`itineraries.csv`, ~30 GB) was too big to upload to Databricks Free Edition, so we created a sample in a Kaggle notebook, where the dataset is stored:
 # MAGIC * we read the file in chunks of 1 million rows with pandas, because it doesn't fit in memory;
-# MAGIC * from each chunk we kept 1% of the rows at random (`sample(frac=0.01, random_state=42)`);
-# MAGIC * taking a bit from every chunk keeps all the routes and all the dates in the sample;
-# MAGIC * `random_state=42` makes the sample reproducible (running it again gives the same rows).
-# MAGIC The result was a file with around 821388 rows (~ 30 MB), which we uploaded to our volume. <br>
-# MAGIC # Preencher ISTO
-# MAGIC Kaggle notebook: *ABD - Flight Prices Sampling* ([link])
-# MAGIC The Spark code in this notebook doesn't depend on the size of the data: with a bigger cluster, the same code would run on the full file.
-# MAGIC  
+# MAGIC * from each chunk we kept 1% of the rows at random (`sample(frac=0.01, random_state=42)`),  so the sample comes from the whole file and not only from the first row;
+# MAGIC
+# MAGIC The result was a file with **821 388 rows (~310 MB)**, which we uploaded to our volume.
+# MAGIC However, the Spark code in this notebook doesn't depend on the size of the data: with a bigger cluster, the same code would run on the full file.
+# MAGIC
 # MAGIC ## Architecture
-# MAGIC
-# MAGIC We followed the Medallion architecture from class, saving all the data in Delta format:
-# MAGIC
+# MAGIC We followed the Medallion architecture, saving all the data in Delta format:
 # MAGIC * **Bronze** - the source files with data rules applied (data types, nulls and duplicates). Saved as Delta files in the volume.
-# MAGIC * **Silver** - business rules: new columns (route, days in advance, day of the week, airline) and join with the airports table, using the airport code (IATA), to get the origin and destination city names (**PERCEBER QUAL A TABELA E COMO FAZ JOIN**). Saved as a table.
-# MAGIC * **Gold** - aggregated tables, one for each question, ready to be queried with SQL.
-# MAGIC * **Streaming** - new prices are read as they arrive, compared with the Gold table and saved in a Delta table. The best price per route is kept updated with MERGE. (**DAR CHECK NESTA PARTE**)
-# MAGIC  
-# MAGIC landing (files)  ->  bronze (Delta files)  ->  silver (table)  ->  gold (tables)
-# MAGIC new JSON files   ->  streaming  ->  st_prices  ->  MERGE  ->  gd_best_price
-# MAGIC  
+# MAGIC * **Silver** - business rules: new columns (route, days in advance, day of the week, airline) and join with the airports table, using the airport code (IATA), to get the city names. Saved as a table.
+# MAGIC * **Gold** - aggregated tables, one for each question.
+# MAGIC * **Streaming** - new prices are read as they arrive, compared with the Gold table and saved in a Delta table. The best price per route is kept updated with MERGE.
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC # 3. Set-up the environment
-
-# COMMAND ----------
-
-# MAGIC %md
+# MAGIC In this section we prepare the environment:
+# MAGIC * we create the schema `flights`, where all our tables are saved, and the volume `lakehouse`, where we keep our files;
+# MAGIC * we import the Spark functions we need and some Python libraries used to generate the streaming files;
+# MAGIC * we save the paths of our folders in variables, so we don't have to write them every time.
 # MAGIC
-# MAGIC First we create the schema `flights`, where all our tables will be saved, and the volume `lakehouse`, where we keep our files (source files, bronze layer and streaming files).
-# MAGIC  
+# MAGIC Our Data Lake has 4 folders inside the volume:
+# MAGIC * **landing** - the original files we uploaded
+# MAGIC * **bronze** - the Bronze layer (Delta files)
+# MAGIC * **stream_input** - where the new prices arrive for the streaming
+# MAGIC * **checkpoints** - used by the streaming to remember which files were already read (created automatically by the streaming)
 
 # COMMAND ----------
 
@@ -99,11 +105,6 @@
 # MAGIC -- Create the schema for our tables and the volume for our files
 # MAGIC CREATE SCHEMA IF NOT EXISTS workspace.flights COMMENT 'ABD project - flight prices';
 # MAGIC CREATE VOLUME IF NOT EXISTS workspace.flights.lakehouse COMMENT 'Files for the ABD project';
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC Import the Spark functions we need (aggregations, window functions, data types) and some Python libraries used to generate the streaming files.
 
 # COMMAND ----------
 
@@ -116,15 +117,6 @@ import datetime
 import json
 import random
 import uuid
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC We save the paths of our folders in variables, so we don't have to write them every time. Our Data Lake has 4 folders inside the volume:
-# MAGIC * **bronze** - the bronze layer (Delta files)
-# MAGIC * **checkpoints** - used by the streaming to remember which files were already read 
-# MAGIC * **landing** - the original files we uploaded
-# MAGIC * **stream_input** - created automatically by the streaming
 
 # COMMAND ----------
 
@@ -144,9 +136,8 @@ dbutils.fs.mkdirs(stream_path)  # Stream
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Upload Files
-# MAGIC We upload the 3 files to the landing folder (Catalog > workspace > flights > lakehouse > landing > Upload)
-# MAGIC and check that they are there:
+# MAGIC ### Upload files
+# MAGIC We uploaded the 3 source files to the `landing` folder (Catalog > workspace > flights > lakehouse > landing > Upload) and check that they are there:
 
 # COMMAND ----------
 
@@ -184,7 +175,7 @@ flights_raw.printSchema()
 
 # COMMAND ----------
 
-# MAGIC %md
+# MAGIC
 # MAGIC %md
 # MAGIC The file has 821388 rows and 27 columns. All columns are read as `string` because a CSV file is just text, so we will correct the data types later (See Section 4.1.3)
 
@@ -194,7 +185,6 @@ display(flights_raw.limit(5))
 
 # COMMAND ----------
 
-# MAGIC %md
 # MAGIC %md
 # MAGIC Each row is one flight price found in a search: when it was searched (`searchDate`), the flight date (`flightDate`), the airports, the airline and the price (`totalFare`).
 # MAGIC Some columns have more than one value separated by `||` (ex: `segmentsAirlineName`), because a flight with stops has one value for each part of the trip.
@@ -218,11 +208,7 @@ display(nulls)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC There are no null values in the most important columns.
-# MAGIC We would remove the rows with nulls in these columns because without them a row is useless for our questions: we can't calculate the price, the days in advance or the route.
-# MAGIC We don't fill the missing values (for example with the average), because inventing prices or dates would change our results.
-# MAGIC The other columns (like `totalTravelDistance`) can have nulls, but we keep these rows because the price and the route are still valid.
-# MAGIC We keep the `dropna` anyway as a data rule: if new files arrive with missing values in the future, the pipeline will remove them automatically.
+# MAGIC There are no nulls in the important columns. We keep the `dropna` anyway as a data rule for future files: without date, airports or price a row is useless, and we don't fill missing values because inventing prices or dates would change the results.
 
 # COMMAND ----------
 
@@ -250,10 +236,7 @@ display(duplicates)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
-# MAGIC There are no duplicated rows in the data.
-# MAGIC We would remove the duplicates because the same price counted twice would give more weight to some flights and change the averages.
-# MAGIC We keep the `dropDuplicates` anyway as a data rule: if new files arrive with duplicates in the future, the pipeline will remove them automatically.
+# MAGIC There are no duplicates. We keep the `dropDuplicates` anyway as a data rule for future files, because the same price counted twice would change the averages.
 
 # COMMAND ----------
 
@@ -267,10 +250,7 @@ print("Rows after:", flights_noDup.count())
 
 # MAGIC %md
 # MAGIC ### 4.1.3 Correct the data types
-
-# COMMAND ----------
-
-# MAGIC %md
+# MAGIC
 # MAGIC All columns came as text (`string`), because a CSV file is just text. Spark can't calculate averages or differences between dates with text, so we convert the columns we need to the correct type:
 # MAGIC - **searchDate** and **flightDate**: `date`, so we can calculate the days between the search and the flight
 # MAGIC - **totalFare**: `double`, a number with decimals (the price)
@@ -278,9 +258,6 @@ print("Rows after:", flights_noDup.count())
 # MAGIC - **seatsRemaining**: `int`, number of seats available
 # MAGIC - **isNonStop**: `boolean`, if it's a direct flight (True/False)
 # MAGIC - **isBasicEconomy**: `boolean`, if it's a Basic Economy ticket (True/False)
-# MAGIC
-# MAGIC We also add a new column, **ingestion_date**, with the date and time when each row was loaded into our Data Lake.
-# MAGIC The other columns stay as text, because they are text (ex: airport codes) or we only use part of them later in the Silver layer.
 
 # COMMAND ----------
 
@@ -292,8 +269,7 @@ bronze_flights = flights_noDup \
     .withColumn("totalTravelDistance", col("totalTravelDistance").cast("int")) \
     .withColumn("seatsRemaining", col("seatsRemaining").cast("int")) \
     .withColumn("isNonStop", col("isNonStop").cast("boolean")) \
-    .withColumn("isBasicEconomy", col("isBasicEconomy").cast("boolean")) \
-    .withColumn("ingestion_date", current_timestamp())
+    .withColumn("isBasicEconomy", col("isBasicEconomy").cast("boolean"))
 
 bronze_flights.printSchema()
 
@@ -303,12 +279,6 @@ bronze_flights.printSchema()
 # MAGIC %md
 # MAGIC Now the dates are `date`, the price and distance are numbers and the yes/no columns are `boolean`, so Spark can calculate averages, differences between dates and percentages.
 # MAGIC `bronze_flights` is our final Bronze DataFrame: no nulls, no duplicates and with the correct data types.
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC JA: CONFIRMAR SE A INGESTION DATE É NECESSÁRIA
-# MAGIC
 
 # COMMAND ----------
 
@@ -327,41 +297,21 @@ bronze_flights.write.format("delta").mode("overwrite").partitionBy("searchDate")
 
 # COMMAND ----------
 
-# MAGIC
-# MAGIC %md
-# MAGIC Let's check the folders created in the Bronze layer:
-
-# COMMAND ----------
-
 # Check the folders created: one folder per search date (partitions) and the _delta_log folder
 display(dbutils.fs.ls(bronze_path + "/flights"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
-# MAGIC Spark created one folder for each search date (`searchDate=2022-04-16`, `searchDate=2022-04-17`, ...), 171 partitions in total, and inside each folder are the Parquet files with the data of that day.
-# MAGIC The `_delta_log` folder is what makes this a Delta table: it keeps the history of all the changes made to the data.
-
-# COMMAND ----------
-
-# Read the Bronze data back to confirm it was saved correctly
-check_bronze = spark.read.format("delta").load(bronze_path + "/flights")
-print("Rows in the Bronze layer:", check_bronze.count())
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC %md
-# MAGIC The Bronze layer has 821 388 rows, the same number we had after cleaning (Section 4.1.2.), so all the data was saved correctly.
+# MAGIC Spark created 171 folders, one for each search date, with the Parquet files of that day inside. The `_delta_log` folder keeps the history of all the changes.
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4.2 Airports
 # MAGIC
-# MAGIC The flights data only has airport codes (ex: JFK), so we use the airports file from OpenFlights to get the city names. This is reference data: a small table that complements the big one.
-# MAGIC The file has no header, so we define the schema ourselves (column names and types). Missing values are written as `\N` in this file.
+# MAGIC The flights data only has airport codes (ex: JFK), so we use the airports file from OpenFlights to get the city names.
+# MAGIC The file has no header, so we define the schema ourselves (column names and types).
 # MAGIC We keep only the airports with an IATA code (the 3-letter code used in the flights data) and the columns we need.
 
 # COMMAND ----------
@@ -406,8 +356,8 @@ airports_bz.show(5)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC From 7698 airports in the file, we kept 6072 with an IATA code. We don't partition this table because it is small.
-# MAGIC In the Silver layer we will join it with the flights using the airport code.
+# MAGIC From 7698 airports in the file, we kept 6072 with an IATA code. 
+# MAGIC In the Silver layer we will join this table with the flights using the airport code.
 
 # COMMAND ----------
 
@@ -433,9 +383,8 @@ reviews_raw.printSchema()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC The file has 23171 reviews and 20 columns. For our analysis we only need two of them: the airline name (`Airline Name`) and the review text (`Review`). %md
-# MAGIC
-# MAGIC So we keep only the airline and the review text, and apply the same data rules as before: remove reviews without airline or text, and remove duplicated reviews.
+# MAGIC The file has 23 171 reviews and 20 columns. For our analysis we only need two of them: the airline name (`Airline Name`) and the review text (`Review`).
+# MAGIC We keep only these two columns and apply the same data rules as before: remove reviews without airline or text, and remove duplicated reviews.
 
 # COMMAND ----------
 
@@ -454,7 +403,6 @@ reviews_bz.show(3, truncate=80)
 
 # COMMAND ----------
 
-# MAGIC %md
 # MAGIC %md
 # MAGIC We went from 23171 to 23046 reviews after removing nulls and duplicates. The Bronze reviews have only two columns: `airline` and `review`.
 
@@ -482,14 +430,8 @@ reviews_bz.show(3, truncate=80)
 
 # MAGIC %md
 # MAGIC # 5. Silver layer
-# MAGIC In the Silver layer we apply business rules: we create the new columns we need to answer our questions and we join the flights with the airports to get the city names.
-# MAGIC The result is saved as a table (`flights.sv_flights`), so it can be queried with SQL.
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC %md
-# MAGIC ## 5.1 Read the Bronze layer
+# MAGIC In the Silver layer we apply business rules: we create the new columns we need to answer our questions and we join the flights with the airports to get the city names. The result is saved as a table (`flights.sv_flights`)
+# MAGIC
 # MAGIC From now on we don't read the original files anymore: we read the clean data from the Bronze layer.
 
 # COMMAND ----------
@@ -500,19 +442,18 @@ airports = spark.read.format("delta").load(bronze_path + "/airports")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
-# MAGIC ## 5.2 New business columns
+# MAGIC ## 5.1 New business columns
 # MAGIC We create the columns we need for our questions:
 # MAGIC * **route** - origin and destination airport together (ex: JFK-LAX)
 # MAGIC * **days_in_advance** - days between the search and the flight
 # MAGIC * **booking_window** - the days in advance grouped (0-7 days, 8-14 days, ...), to compare prices by group (Question 1)
 # MAGIC * **weekday** - day of the week of the flight (Question 2)
-# MAGIC * **airline** - the main airline. The column `segmentsAirlineName` has one airline for each part of the trip, separated by `||` (ex: `Delta||Delta`), so we keep the first one
+# MAGIC * **airline** - the main airline. The column `segmentsAirlineName` has one airline for each part of the trip, separated by `||` (ex: `Delta||Delta`), we have decided to keep the first one
 
 # COMMAND ----------
 
 
-
+# Create the new business columns: route, days in advance, booking window, weekday and main airline
 flights_sv = flights \
     .withColumn("route", concat_ws("-", "startingAirport", "destinationAirport")) \
     .withColumn("days_in_advance", datediff("flightDate", "searchDate")) \
@@ -527,8 +468,7 @@ flights_sv = flights \
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
-# MAGIC ## 5.3 Join with the airports
+# MAGIC ## 5.2 Join with the airports
 # MAGIC We join the flights with the airports table using the airport code (IATA), to get the origin and destination city names.
 # MAGIC We do the join twice: once for the origin airport and once for the destination airport.
 # MAGIC * **left join** - we keep all the flights, even if an airport is not found in the airports table
@@ -558,15 +498,13 @@ print("Flights without destination city:", flights_sv.where(col("destination_cit
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
 # MAGIC All flights got the origin and destination city names (0 flights without city), so all the airports in the flights data exist in the airports table.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
-# MAGIC ## 5.4 Save the Silver table
-# MAGIC We save the result as a Delta table in our schema (`flights.sv_flights`). Unlike the Bronze layer (files in a folder), the Silver layer is a table, so it can be queried directly with SQL.
+# MAGIC ## 5.3 Save the Silver table
+# MAGIC We save the result as a Delta table in our schema (`flights.sv_flights`). Unlike the Bronze layer (files in a folder), the Silver layer is a table.
 
 # COMMAND ----------
 
@@ -580,8 +518,7 @@ display(spark.table("flights.sv_flights").limit(5))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
-# MAGIC ## 5.5 Overview of the Silver table
+# MAGIC ## 5.4 Overview of the Silver table
 # MAGIC A quick summary of our data with SQL.
 # MAGIC
 
@@ -598,7 +535,7 @@ display(spark.table("flights.sv_flights").limit(5))
 
 # COMMAND ----------
 
-# MAGIC %md
+# MAGIC
 # MAGIC %md
 # MAGIC Our Silver table has 821388 prices for 234 routes and 14 airlines, searched between 2022-04-16 and 2022-10-05. The average price is $340.38.
 
@@ -610,7 +547,7 @@ display(spark.table("flights.sv_flights").limit(5))
 # MAGIC * `gd_booking_window` - Question 1: price by booking window
 # MAGIC * `gd_routes` - Question 2: cheapest routes from each airport
 # MAGIC * `gd_airline_weekday` - Question 2: price by airline and day of the week
-# MAGIC * `gd_route_avg` - average price per route, used later by the streaming (Question 3)
+# MAGIC * `gd_route_avg` - average price per route, used later by the streaming (Question 4)
 
 # COMMAND ----------
 
@@ -640,9 +577,9 @@ gd_booking_window.write.format("delta").mode("overwrite").saveAsTable("flights.g
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC **Answer to Question 1:** buying 31 - 60 days in advance is the cheapest option, with an average price of $328.84.
-# MAGIC Last-minute flights 0-7 days are the most expensive, with an average of $370.13, 12.6% more. So, for a traveller, booking 1 to 2 months before the flight saves on average around $41 per ticket compared to buying in the last week.
-# MAGIC
+# MAGIC **Answer to Question 1:** buying 31-60 days in advance is the cheapest option, with an average price of $328.84.
+# MAGIC Last-minute flights (0-7 days) are the most expensive, with an average of $370.13, 12.6% more. So, for a traveller, booking 1 to 2 months before the flight saves on average around $41 per ticket compared to buying in the last week.
+# MAGIC There are no prices for more than 60 days in advance, because in this dataset the flights were searched at most around 60 days before.
 
 # COMMAND ----------
 
@@ -682,20 +619,17 @@ gd_routes.write.format("delta").mode("overwrite").option("overwriteSchema", "tru
 
 # MAGIC %md
 # MAGIC **Answer to Question 2 (routes):**
-# MAGIC * **New York (LGA) is the cheapest destination from 7 of the 16 airports** (ATL, BOS, CLT, DFW, DTW, MIA, ORD). It is the market with more flights and more competition between airlines.
-# MAGIC * **The cheapest routes are short and frequent**, like LGA-BOS ($138.62, the cheapest route) and LAX-SFO ($181.73). These routes also have many direct flights (70-80%).
-# MAGIC * **Oakland (OAK) is the exception:** even its cheapest destination (LAX, $321.40) costs more than twice LGA-BOS, and almost all trips have stops (0% to 14% direct flights).
+# MAGIC * **New York (LGA) is the cheapest destination from 7 of the 16 airports** (ATL, BOS, CLT, DFW, DTW, MIA, ORD). A possible explanation is that New York is a big market with many airlines competing, but we didn't analyse this directly.
+# MAGIC * **The cheapest routes are short and have many direct flights**, like BOS-LGA ($144.53, 416 miles, 64% direct flights) and LAX-SFO ($181.73, 79% direct flights).
+# MAGIC * **Oakland (OAK) is the exception:** even its cheapest destination (LAX, $321.40) costs more than twice the cheapest routes, and almost all trips have stops (0% to 14% direct flights).
 # MAGIC
-# MAGIC makes sense to add the totalTravelDistance?
-# MAGIC
-# MAGIC So a cheap route is not one with more stops: the cheapest routes have many direct flights, and the most expensive (from Oakland) have almost none. However, the cheapest routes are also the shortest, so distance probably explains part of the price.
+# MAGIC So a cheap route is not one with more stops: the cheapest routes have many direct flights. The cheapest routes are also short, so distance explains part of the price.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
 # MAGIC ### Cheapest airlines and days of the week
-# MAGIC We calculate the average price for each airline and day of the week. We use **pivot** to turn the days of the week into columns, so we can compare airlines and days in one table (like a pivot table in Excel).
+# MAGIC We calculate the average price for each airline and day of the week. We use **pivot** to turn the days of the week into columns, so we can compare airlines and days in one table.
 # MAGIC As with the routes, we only keep airlines with at least 30 prices, so the averages are reliable.
 
 # COMMAND ----------
@@ -716,9 +650,8 @@ display(spark.table("flights.gd_airline_weekday").orderBy("Tue"))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
 # MAGIC **Answer to Question 2 (airlines and days):**
-# MAGIC * **Tuesday is the cheapest day** for almost all airlines((only not in BoutiqueAir)), and **Sunday is the most expensive**(only not in CapeAir). For example, a Delta flight costs on average $339.31 on Tuesday and $459.76 on Sunday (35% more).
+# MAGIC * **Tuesday is the cheapest day** for almost all airlines (except Boutique Air, cheaper on Wednesday, and Southern Airways Express, cheaper on Saturday), and **Sunday is the most expensive** (except Cape Air, more expensive on Friday). For example, a Delta flight costs on average $339.31 on Tuesday and $459.76 on Sunday (35% more).
 # MAGIC * **The low-cost airlines are the cheapest:** Spirit and Frontier have an average price around $200, and Frontier on Tuesday has the lowest price of the table ($162.25).
 # MAGIC * **Among the big airlines, Delta is the most expensive** (around $393 on average), followed by United and American.
 # MAGIC
@@ -728,7 +661,7 @@ display(spark.table("flights.gd_airline_weekday").orderBy("Tue"))
 
 # MAGIC %md
 # MAGIC ## 6.3 Average price per route (used later by the streaming)
-# MAGIC This table is not an answer by itself: it is the "reference price" of each route. In the streaming part (Question 3), every new price that arrives is compared with this average to decide if it is a deal.
+# MAGIC This table is not an answer by itself: it is the "reference price" of each route. In the streaming part (Question 4), every new price that arrives is compared with this average to decide if it is a deal.
 # MAGIC We only keep routes with at least 30 prices, so the reference is reliable.
 
 # COMMAND ----------
@@ -743,15 +676,12 @@ gd_route_avg.orderBy(desc("n_prices")).show(10)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
-# MAGIC We have the average price of each route. The routes with more prices are the long ones between the big cities on the east and west coasts (ex: ATL-LAX with 7 103 prices, average $368.82), and these will be used to generate the new prices in the streaming.
-# MAGIC
-# MAGIC A curious fact is that LAX is present in all 10 top n_prices, which could probably mean that there is more flights for this destination or more flights departing from this airport.
+# MAGIC We have the average price of each route, and these will be used to generate the new prices in the streaming.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # 7. Reviews (Question 4)
+# MAGIC # 7. Reviews (Question 3)
 # MAGIC The reviews are our unstructured data: free text written by passengers. Spark can't "read" text like we do, so we turn the text into numbers:
 # MAGIC * **7.1** - Word Count: the most common words in the reviews
 # MAGIC * **7.2** - We mark the reviews that talk about problems (delays, lost bags, refunds...) and calculate the % of complaints per airline
@@ -759,7 +689,7 @@ gd_route_avg.orderBy(desc("n_prices")).show(10)
 
 # COMMAND ----------
 
-# MAGIC %md
+# MAGIC
 # MAGIC %md
 # MAGIC ## 7.1 Most common words in the reviews
 # MAGIC We use the Word Count algorithm from class: we clean the text (lower case and no punctuation), split it into words, remove the common words without meaning (stop words, like "the" or "and") and count how many times each word appears.
@@ -828,30 +758,20 @@ complaints.orderBy(desc("pct_complaints")).show()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
-# MAGIC **Result (complaints per airline):**
-# MAGIC After the `left_semi` join, only the airlines that exist in the flights data remain, so mixed groups from the reviews data are no longer in the table.
+# MAGIC **Result (complaints per airline):** after the `left_semi` join, only the 11 airlines that exist in the flights data remain (a `left_semi` join keeps only the reviews whose airline exists in the flights data, without adding columns).
 # MAGIC * **JetBlue has the highest percentage of complaints (86%)**, followed by Frontier (80%), United (74%) and Sun Country (73%).
-# MAGIC * **Alaska (57.6%), Cape Air (58.5%), Delta and Hawaiian (64%) have the fewest complaints.**
-# MAGIC * Delta is the most expensive of the big airlines (Question 2), but it is also one of the airlines with fewer complaints. The low-cost airlines (Frontier and Spirit) are cheap, but they have more complaints (80% and 69%).
-# MAGIC  
-# MAGIC **Limitations:**
-# MAGIC * Most airlines have only 100 reviews (American has 200), and Boutique Air (38) and Cape Air (41) have even fewer, so these percentages are less reliable.
-# MAGIC * The percentages are high for all airlines (all above 55%) because people usually write reviews after a bad experience.
-# MAGIC
-# MAGIC
+# MAGIC * **Alaska (57.6%) and Cape Air (58.5%) have the fewest complaints**, followed by Delta and Hawaiian (64%).
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
-# MAGIC ## 7.3 Complaints vs price (Question 4)
-# MAGIC Now we join the two types of data to answer Question 4:
+# MAGIC ## 7.3 Complaints vs price (Question 3)
+# MAGIC Now we join the two types of data to answer Question 3:
 # MAGIC * **structured data**: the average price of each airline, calculated from the Silver table (`sv_flights`)
 # MAGIC * **unstructured data**: the percentage of reviews with complaints of each airline, from 7.2
 # MAGIC
-# MAGIC The airline names are a bit different in the two datasets (ex: "Delta" in the flights and "Delta Air Lines" in the reviews), so we join them by the first word of the name in lower case (`airline_key`).
-# MAGIC We use an inner join, so only the airlines that exist in both datasets remain.
+# MAGIC The airline names are a bit different in the two datasets (ex: "Delta" in the flights and "Delta Air Lines" in the reviews), so we join them by the first word of the name in lower case (`airline_key`). Since in 7.2 we already kept only the airlines of the flights data, the join adds the average price to each of the 11 airlines.
+# MAGIC Finally, we calculate the correlation between price and complaints (from -1 to 1): close to -1 means that cheaper airlines have more complaints.
 
 # COMMAND ----------
 
@@ -882,17 +802,17 @@ print(f"Correlation between price and complaints: {correlation:.2f}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC **Answer to Question 4:**
-# MAGIC * The percentage of complaints is high for all airlines (between 69% and 86%), because people usually write reviews when something goes wrong.
-# MAGIC * There is a **slight tendency for cheaper airlines to have more complaints**: the correlation between price and complaints is -0.58. Frontier (low-cost) has 80% of reviews with complaints, while Delta, the most expensive of the big airlines, has the lowest value (64%).
+# MAGIC **Answer to Question 3:**
+# MAGIC * The percentage of complaints is high for all airlines (between 57.6% and 86%), because people usually write reviews when something goes wrong.
+# MAGIC * There is a **moderate tendency for cheaper airlines to have more complaints**: the correlation between price and complaints is -0.58. Frontier (low-cost) has 80% of reviews with complaints, while Delta, the most expensive of the big airlines, has 64%, and Alaska has the lowest value (57.6%).
 # MAGIC * **JetBlue is the exception:** it has a medium price ($267.62) but the highest percentage of complaints (86%), so price doesn't explain everything.
 # MAGIC
-# MAGIC **Limitation:** we only have 11 airlines and around 100 reviews per airline, so this is an indication and not a strong conclusion.
+# MAGIC **Limitation:** we only have 11 airlines and around 100 reviews per airline (Boutique Air and Cape Air have less than 50), so this is an indication and not a strong conclusion.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # 8. Streaming (Question 3)
+# MAGIC # 8. Streaming (Question 4)
 # MAGIC Until now we worked in **batch**: all the data was already in the file. With **streaming**, new data keeps arriving and Spark processes it as it arrives, which is what a website like Skyscanner needs when airlines send new prices.
 # MAGIC
 # MAGIC We don't have access to real-time prices, so we **simulate** new prices arriving as JSON files in a folder. The prices are based on the real routes and average prices of our Gold table.
@@ -901,9 +821,8 @@ print(f"Correlation between price and complaints: {correlation:.2f}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
 # MAGIC ## 8.1 Prepare the folders
-# MAGIC We delete the files, the checkpoint and the table from previous runs, so the demo always starts from zero.
+# MAGIC We delete the files, the checkpoint and the tables from previous runs (`st_prices` and `gd_best_price`), so the demo always starts from zero and the version history of section 9 starts at version 0.
 
 # COMMAND ----------
 
@@ -918,17 +837,19 @@ spark.sql("DROP TABLE IF EXISTS flights.gd_best_price")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
 # MAGIC ## 8.2 Price generator (simulates the airlines)
 # MAGIC This function creates a JSON file with 20 new prices. For each price it picks one of the 30 routes with more data and uses the real average price of that route:
 # MAGIC * 80% of the prices are normal (between 80% and 130% of the average)
 # MAGIC * 20% of the prices are deals (between 40% and 70% of the average)
-# MAGIC This way we know that some deals will appear, and we can check if the streaming finds them.
+# MAGIC
+# MAGIC This way we know that some deals will appear, and we can check if the streaming finds them. We fix the random seed so the results are the same every time we run the notebook.
 
 # COMMAND ----------
 
 # Function to create a file with new prices
 # We use real routes and average prices from the Gold table, and some prices are much lower (deals)
+
+random.seed(42)   # fixed seed: the simulated prices are the same every time we run the notebook
 
 routes = spark.table("flights.gd_route_avg").orderBy(desc("n_prices")).limit(30).collect()
 
@@ -941,7 +862,7 @@ def new_prices_file(n=20):
         else:
             price = r["avg_price"] * random.uniform(0.8, 1.3)    # normal price
         rows.append(json.dumps({
-            "id": str(),
+            "id": str(uuid.uuid4()),
             "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "route": r["route"],
             "price": float("%.2f" % price)
@@ -952,7 +873,7 @@ def new_prices_file(n=20):
 
 # COMMAND ----------
 
-# MAGIC %md
+# MAGIC
 # MAGIC %md
 # MAGIC ## 8.3 The first prices arrive
 # MAGIC We call the function 3 times, so 3 files with 20 prices each (60 prices) arrive in the `stream_input` folder.
@@ -968,7 +889,7 @@ display(dbutils.fs.ls(stream_path))
 
 # COMMAND ----------
 
-# MAGIC %md
+# MAGIC
 # MAGIC %md
 # MAGIC ## 8.4 Streaming query: source -> transformation -> sink
 # MAGIC **Source:** we tell Spark to read the JSON files of the `stream_input` folder as a stream. For file streams we have to give the schema (the columns and types of the files).
@@ -989,9 +910,8 @@ prices_stream = spark.readStream.format("json").schema(prices_schema).load(strea
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
 # MAGIC **Transformation:** we join each new price with the average price of its route (from the Gold table `gd_route_avg`) and calculate:
-# MAGIC * `pct_vs_avg` - how much the price is above or below the average (in %)
+# MAGIC * `price_vs_avg` - the difference in $ between the new price and the average price of the route (negative = cheaper than average)
 # MAGIC * `is_deal` - True if the price is 30% or more below the average
 
 # COMMAND ----------
@@ -1008,7 +928,7 @@ deals_stream = prices_stream \
 
 # COMMAND ----------
 
-# MAGIC %md
+# MAGIC
 # MAGIC %md
 # MAGIC **Sink:** we write the results to a Delta table (`flights.st_prices`).
 # MAGIC * `checkpointLocation` - the checkpoint is the "memory" of the streaming: it saves which files were already read, so each file is processed only once
@@ -1033,12 +953,12 @@ print("Rows in the table:", spark.table("flights.st_prices").count())
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
+# MAGIC
 # MAGIC The streaming read the 3 files and saved 60 prices in the table `st_prices`.
 
 # COMMAND ----------
 
-# MAGIC %md
+# MAGIC
 # MAGIC %md
 # MAGIC ## 8.5 Deals found
 # MAGIC The prices marked as deals (30% or more below the average of the route).
@@ -1055,7 +975,18 @@ print("Rows in the table:", spark.table("flights.st_prices").count())
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # 9. Delta Lake: table with the best price per route (MERGE and time travel)
+# MAGIC From the 60 new prices, the streaming found **5 deals**. The best one was on route DTW-LAX: $180.57, $228.10 below the average of the route ($408.64).
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # 9. Delta Lake: best price per route (MERGE and time travel)
+# MAGIC Like Skyscanner shows "the cheapest price found" for each route, we keep a table with the **best price of each route** (`gd_best_price`), updated every time new prices arrive. We use three Delta Lake features:
+# MAGIC * **MERGE** - updates the routes that already exist (if the new price is lower) and inserts the new routes, in one command
+# MAGIC * **DESCRIBE HISTORY** - shows all the versions of the table (each change creates a new version)
+# MAGIC * **Time travel** - lets us query the table as it was in an older version
+# MAGIC
+# MAGIC First we create the empty table (version 0).
 
 # COMMAND ----------
 
@@ -1065,6 +996,15 @@ print("Rows in the table:", spark.table("flights.st_prices").count())
 # MAGIC   best_price DOUBLE,
 # MAGIC   time TIMESTAMP
 # MAGIC ) USING DELTA
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 9.1 First MERGE
+# MAGIC We calculate the lowest price of each route from the streaming table (`st_prices`) and save it in a temporary view, to use it in the MERGE:
+# MAGIC * if the route already exists and the new price is lower → **UPDATE**
+# MAGIC * if the route doesn't exist yet → **INSERT**
+# MAGIC * if the new price is not lower → nothing happens
 
 # COMMAND ----------
 
@@ -1089,10 +1029,13 @@ spark.table("flights.st_prices").groupBy("route") \
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC We call the function 3 times, we run the same streaming query again and only the new files are read (because of the checkpoint).
-# MAGIC
-# MAGIC First simulation we create the new stream data:
-# MAGIC - When appears new data we Insert a new `route`,`best_price`, `time` inside the table `gd_best_price`
+# MAGIC The table was empty, so the first MERGE inserted all the routes (27 routes). This is version 1 of the table.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 9.2 New prices arrive
+# MAGIC 3 more files arrive (60 new prices). We run the same streaming query again: thanks to the checkpoint, **only the 3 new files are read**, so the table goes from 60 to 120 rows (and not 180).
 
 # COMMAND ----------
 
@@ -1100,7 +1043,7 @@ new_prices_file()
 new_prices_file()
 new_prices_file()
 
-#Now there are 3 mores files in the directory in fights.st_prices
+# 3 new files arrive and we run the same streaming query again (only the new files are read)
 
 query = deals_stream.writeStream \
     .format("delta") \
@@ -1112,6 +1055,12 @@ query = deals_stream.writeStream \
 query.awaitTermination()
 
 print("Rows in the table:", spark.table("flights.st_prices").count())
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 9.3 Second MERGE
+# MAGIC We update the view with the lowest price of each route, now using the 120 prices, and run the same MERGE again. Now the routes already exist in the table, so they are updated only if a new price is lower, and the new routes are inserted.
 
 # COMMAND ----------
 
@@ -1135,21 +1084,27 @@ spark.table("flights.st_prices").groupBy("route") \
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC After the second stream simulation we will consider a new View `new_best_prices`, and we will consider in our gd_best_price table the following changes (considering it has the 1st stream data):
-# MAGIC - We will `INSERT` a new row when there's no price to a certain route.
-# MAGIC - We will `UPDATE` replace a new price to a certain route that as a condition to understand if the price is lower than the new price will be the lowest to that route.
-# MAGIC - If that condition doesn't verify nothing happens. 
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC -- History of the table (one version for each change)
-# MAGIC DESCRIBE HISTORY flights.gd_best_price
+# MAGIC In the second MERGE, 17 routes got a lower price (updated) and 3 new routes were inserted. This is version 2 of the table.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Here we can see a history simulation of the table `gd_best_price` behaviour, as we execute the two streams of the notebook, to have a clear image of a real stream simulation.
+# MAGIC
+# MAGIC ## 9.4 History and time travel
+# MAGIC Every change to a Delta table creates a new version. With `DESCRIBE HISTORY` we see all the versions, and with `VERSION AS OF` we can query an older version.
+
+# COMMAND ----------
+
+# History of the table: one version for each change
+display(spark.sql("DESCRIBE HISTORY flights.gd_best_price")
+        .select("version", "timestamp", "operation", "operationMetrics"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC
+# MAGIC The history shows all the versions of the table: version 0 (CREATE TABLE), version 1 (first MERGE) and version 2 (second MERGE), with the number of rows inserted and updated in each one (`operationMetrics`).
+# MAGIC We can also see an **OPTIMIZE** version, which we didn't run: Databricks does it automatically to combine the small files of the table into one, so the queries are faster. The data doesn't change.
 
 # COMMAND ----------
 
@@ -1162,6 +1117,13 @@ spark.table("flights.st_prices").groupBy("route") \
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC Comparing version 1 with the current version, many routes got a lower price after the second wave (ex: ORD-LAX went from $419.07 to $191.65, and BOS-LAX from $359.60 to $167.09). The routes without a price in version 1 (LAX-EWR, LAX-LGA and LGA-DFW) are the 3 new routes inserted in the second MERGE.
+# MAGIC
+# MAGIC **Answer to Question 4:** yes, we can detect deals as soon as new prices arrive. The streaming query compares each new price with the average of its route and marks the deals, and the MERGE keeps the best price of each route always updated. Thanks to the checkpoint each file is read only once, and with Delta Lake we can see every change in the history and go back to any version (time travel).
+
+# COMMAND ----------
+
 # MAGIC %sql
 # MAGIC -- All the tables we created
 # MAGIC SHOW TABLES IN flights
@@ -1169,28 +1131,24 @@ spark.table("flights.st_prices").groupBy("route") \
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC %md
 # MAGIC # 10. Conclusions
 # MAGIC
-# MAGIC **Main finding:** the price of a flight depends mostly on **when you buy it, when you fly and who you fly with**. Buying early, flying mid-week and choosing a low-cost airline can save a traveller a significant part of the ticket price. The route also matters, but its effect is partly explained by distance and competition.
+# MAGIC **Main finding:** the price of a flight depends mostly on **when you buy it, when you fly and who you fly with**. Buying early, flying mid-week and choosing a low-cost airline can save a traveller a significant part of the ticket price.
 # MAGIC
-# MAGIC ## What we learned
-# MAGIC
-# MAGIC * **Timing is the easiest way to save money.** Booking 1 to 2 months ahead is about 12% cheaper than buying in the last week, and Tuesday is cheaper than Sunday for almost every airline. Both effects are consistent, not isolated cases.
-# MAGIC * **Cheap routes are short, frequent and competitive.** The cheapest routes (e.g. LGA-BOS) have many direct flights, while the most expensive ones (from Oakland) have almost none. Distance was not analysed directly, so it probably explains part of this difference.
-# MAGIC * **Cheap does not mean better.** Low-cost airlines have the lowest prices but also more complaints (correlation of -0.58). `JetBlue` shows that price alone does not explain customer satisfaction.
+# MAGIC ## Answers to our questions
+# MAGIC 1. **When to buy:** booking 31-60 days ahead is the cheapest option ($328.84). Last-minute tickets (0-7 days) cost 12.6% more, around $41 per ticket.
+# MAGIC 2. **Cheapest routes, airlines and days:** the cheapest routes are short, busy and with many direct flights (ex: BOS-LGA, $144.53, 416 miles), so distance and competition explain part of the price. Tuesday is the cheapest day and Sunday the most expensive for almost all airlines, and the low-cost airlines (Frontier and Spirit, around $199) are the cheapest.
+# MAGIC 3. **Complaints vs price:** cheaper airlines tend to have more complaints (correlation of -0.58), but JetBlue, with a medium price, has the most complaints (86%), so price doesn't explain everything.
+# MAGIC 4. **Deals in real time:** the streaming pipeline compared each new price with the average of its route and found 5 deals in the first 60 prices, and the MERGE kept the best price of each route always updated (17 routes got cheaper after the second wave). Thanks to the checkpoint, each file was read only once.
 # MAGIC
 # MAGIC ## Practical recommendation
-# MAGIC
-# MAGIC **The cheapest combination in our data:** book 31-60 days ahead, fly on a Tuesday, choose a short and busy route (like LGA-BOS, $138.62 on average) and fly with a low-cost airline. Frontier on a Tuesday has the lowest average price of the table ($162.25), followed by `Spirit` ($169.82). On a Sunday the same airlines cost $257.16 and $243.09.
-# MAGIC
-# MAGIC * **Lowest price:** `Frontier` or `Spirit` (around $199 on average), but with more complaints.
-# MAGIC * **Balanced:** `American`, the cheapest of the big airlines ($309, vs $367 for `United` and $390 for `Delta`).
-# MAGIC * **Best service:** `Alaska` has the fewest complaints (58%), followed by `Delta` (64%), but both are more expensive.
-# MAGIC * **Worst value:** `JetBlue`, with a medium price ($268) and the highest percentage of complaints (86%).
-# MAGIC
-# MAGIC Whatever the airline, avoid last-minute tickets (around $41 more on average) and Sunday flights, and prefer short routes with direct flights.
+# MAGIC Book 31-60 days ahead, fly on a Tuesday and choose a short, busy route. For the lowest price choose Frontier or Spirit (but expect more complaints); for a balance between price and service choose American, the cheapest of the big airlines ($309). Avoid last-minute tickets and Sunday flights.
 # MAGIC
 # MAGIC ## Limitations and next steps
-# MAGIC
-# MAGIC We used a 1% sample because of the limits of Databricks Free Edition, the streaming data is simulated, and the data is only from US flights in 2022. Next steps: use the full dataset, include travel distance in the route analysis, and connect the pipeline to a real price source.
+# MAGIC * We used a 1% sample (821 388 rows) because of the limits of Databricks Free Edition; the code would be the same for the full dataset.
+# MAGIC * The flight data is only from US flights in 2022, and the streaming prices are simulated (based on the real average prices).
+# MAGIC * We have only around 100 reviews per airline, so the complaints analysis is an indication.
+# MAGIC * Next steps: use the full dataset, connect the pipeline to a real price source and use Spark ML to predict prices.
+
+# COMMAND ----------
+
