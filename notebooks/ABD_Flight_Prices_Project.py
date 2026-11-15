@@ -27,8 +27,7 @@
 # MAGIC 6. Gold layer (Questions 1 and 2)
 # MAGIC 7. Reviews (Question 3)
 # MAGIC 8. Streaming (Question 4)
-# MAGIC 9. Delta Lake: MERGE and time travel
-# MAGIC 10. Conclusions
+# MAGIC 9. Conclusions
 
 # COMMAND ----------
 
@@ -52,7 +51,7 @@
 # MAGIC | 1 | How many days in advance should we buy to get a cheaper flight? | Structured | 6.1 |
 # MAGIC | 2 | Which routes and airlines are the cheapest, and on which days of the week? | Structured | 6.2 |
 # MAGIC | 3 | Do cheaper airlines get more complaints from passengers? | Unstructured | 7 |
-# MAGIC | 4 | Can we detect good deals as soon as new prices arrive? | Streaming | 8 and 9 |
+# MAGIC | 4 | Can we detect good deals as soon as new prices arrive? | Streaming | 8 |
 
 # COMMAND ----------
 
@@ -82,7 +81,7 @@
 # MAGIC * **Bronze** - the source files with data rules applied (data types, nulls and duplicates). Saved as Delta files in the volume.
 # MAGIC * **Silver** - business rules: new columns (route, days in advance, day of the week, airline) and join with the airports table, using the airport code (IATA), to get the city names. Saved as a table.
 # MAGIC * **Gold** - aggregated tables, one for each question.
-# MAGIC * **Streaming** - new prices are read as they arrive, compared with the Gold table and saved in a Delta table. The best price per route is kept updated with MERGE.
+# MAGIC * **Streaming** - new prices are read as they arrive, compared with the Gold table and saved in a Delta table.
 
 # COMMAND ----------
 
@@ -821,8 +820,9 @@ print(f"Correlation between price and complaints: {correlation:.2f}")
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC %md
 # MAGIC ## 8.1 Prepare the folders
-# MAGIC We delete the files, the checkpoint and the tables from previous runs (`st_prices` and `gd_best_price`), so the demo always starts from zero and the version history of section 9 starts at version 0.
+# MAGIC We delete the files, the checkpoint and the table from previous runs, so the demo always starts from zero.
 
 # COMMAND ----------
 
@@ -832,7 +832,6 @@ dbutils.fs.rm(stream_path, True)
 dbutils.fs.rm(checkpoint_path, True)
 dbutils.fs.mkdirs(stream_path)
 spark.sql("DROP TABLE IF EXISTS flights.st_prices")
-spark.sql("DROP TABLE IF EXISTS flights.gd_best_price")
 
 # COMMAND ----------
 
@@ -980,62 +979,8 @@ print("Rows in the table:", spark.table("flights.st_prices").count())
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # 9. Delta Lake: best price per route (MERGE and time travel)
-# MAGIC Like Skyscanner shows "the cheapest price found" for each route, we keep a table with the **best price of each route** (`gd_best_price`), updated every time new prices arrive. We use three Delta Lake features:
-# MAGIC * **MERGE** - updates the routes that already exist (if the new price is lower) and inserts the new routes, in one command
-# MAGIC * **DESCRIBE HISTORY** - shows all the versions of the table (each change creates a new version)
-# MAGIC * **Time travel** - lets us query the table as it was in an older version
-# MAGIC
-# MAGIC First we create the empty table (version 0).
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC CREATE OR REPLACE TABLE flights.gd_best_price (
-# MAGIC   route STRING,
-# MAGIC   best_price DOUBLE,
-# MAGIC   time TIMESTAMP
-# MAGIC ) USING DELTA
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 9.1 First MERGE
-# MAGIC We calculate the lowest price of each route from the streaming table (`st_prices`) and save it in a temporary view, to use it in the MERGE:
-# MAGIC * if the route already exists and the new price is lower → **UPDATE**
-# MAGIC * if the route doesn't exist yet → **INSERT**
-# MAGIC * if the new price is not lower → nothing happens
-
-# COMMAND ----------
-
-# Get the lowest price of each route from the streaming table and create a temporary view to use in the MERGE
-
-spark.table("flights.st_prices").groupBy("route") \
-    .agg(min("price").alias("best_price"), max("time").alias("time")) \
-    .createOrReplaceTempView("new_best_prices")
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC -- Update the route if the new price is lower, insert the route if it is new
-# MAGIC MERGE INTO flights.gd_best_price AS a
-# MAGIC USING new_best_prices AS b
-# MAGIC ON a.route = b.route
-# MAGIC WHEN MATCHED AND b.best_price < a.best_price THEN
-# MAGIC   UPDATE SET a.best_price = b.best_price, a.time = b.time
-# MAGIC WHEN NOT MATCHED THEN
-# MAGIC   INSERT (route, best_price, time) VALUES (b.route, b.best_price, b.time)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC The table was empty, so the first MERGE inserted all the routes (27 routes). This is version 1 of the table.
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 9.2 New prices arrive
-# MAGIC 3 more files arrive (60 new prices). We run the same streaming query again: thanks to the checkpoint, **only the 3 new files are read**, so the table goes from 60 to 120 rows (and not 180).
+# MAGIC ## 8.6 New prices arrive
+# MAGIC 3 more files arrive (60 new prices) and we run the same streaming query again: thanks to the checkpoint, **only the 3 new files are read**, so the table goes from 60 to 120 rows (and not 180).
 
 # COMMAND ----------
 
@@ -1059,68 +1004,7 @@ print("Rows in the table:", spark.table("flights.st_prices").count())
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 9.3 Second MERGE
-# MAGIC We update the view with the lowest price of each route, now using the 120 prices, and run the same MERGE again. Now the routes already exist in the table, so they are updated only if a new price is lower, and the new routes are inserted.
-
-# COMMAND ----------
-
-# Update the view with the new prices and run the MERGE again
-
-spark.table("flights.st_prices").groupBy("route") \
-    .agg(min("price").alias("best_price"), max("time").alias("time")) \
-    .createOrReplaceTempView("new_best_prices")
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC MERGE INTO flights.gd_best_price AS a
-# MAGIC USING new_best_prices AS b
-# MAGIC ON a.route = b.route
-# MAGIC WHEN MATCHED AND b.best_price < a.best_price THEN
-# MAGIC   UPDATE SET a.best_price = b.best_price, a.time = b.time
-# MAGIC WHEN NOT MATCHED THEN
-# MAGIC   INSERT (route, best_price, time) VALUES (b.route, b.best_price, b.time)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC In the second MERGE, 17 routes got a lower price (updated) and 3 new routes were inserted. This is version 2 of the table.
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC
-# MAGIC ## 9.4 History and time travel
-# MAGIC Every change to a Delta table creates a new version. With `DESCRIBE HISTORY` we see all the versions, and with `VERSION AS OF` we can query an older version.
-
-# COMMAND ----------
-
-# History of the table: one version for each change
-display(spark.sql("DESCRIBE HISTORY flights.gd_best_price")
-        .select("version", "timestamp", "operation", "operationMetrics"))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC
-# MAGIC The history shows all the versions of the table: version 0 (CREATE TABLE), version 1 (first MERGE) and version 2 (second MERGE), with the number of rows inserted and updated in each one (`operationMetrics`).
-# MAGIC We can also see an **OPTIMIZE** version, which we didn't run: Databricks does it automatically to combine the small files of the table into one, so the queries are faster. The data doesn't change.
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC -- Comparison between the first MERGE (version 1) with the current version (2nd stream)
-# MAGIC SELECT a.route, b.best_price AS price_version_1, a.best_price AS price_now
-# MAGIC FROM flights.gd_best_price a
-# MAGIC LEFT JOIN flights.gd_best_price VERSION AS OF 1 b ON a.route = b.route
-# MAGIC ORDER BY a.route
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC Comparing version 1 with the current version, many routes got a lower price after the second wave (ex: ORD-LAX went from $419.07 to $191.65, and BOS-LAX from $359.60 to $167.09). The routes without a price in version 1 (LAX-EWR, LAX-LGA and LGA-DFW) are the 3 new routes inserted in the second MERGE.
-# MAGIC
-# MAGIC **Answer to Question 4:** yes, we can detect deals as soon as new prices arrive. The streaming query compares each new price with the average of its route and marks the deals, and the MERGE keeps the best price of each route always updated. Thanks to the checkpoint each file is read only once, and with Delta Lake we can see every change in the history and go back to any version (time travel).
+# MAGIC **Answer to Question 4:** yes, we can detect deals as soon as new prices arrive. The streaming query reads only the new files, compares each price with the average of its route and marks the deals: it found 5 deals in the first 60 prices (the best one on route DTW-LAX, $228.10 below the average). Thanks to the checkpoint, when 3 more files arrived only the new ones were read (120 rows, not 180).
 
 # COMMAND ----------
 
@@ -1131,15 +1015,15 @@ display(spark.sql("DESCRIBE HISTORY flights.gd_best_price")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # 10. Conclusions
+# MAGIC # 9. Conclusions
 # MAGIC
 # MAGIC **Main finding:** the price of a flight depends mostly on **when you buy it, when you fly and who you fly with**. Buying early, flying mid-week and choosing a low-cost airline can save a traveller a significant part of the ticket price.
 # MAGIC
 # MAGIC ## Answers to our questions
 # MAGIC 1. **When to buy:** booking 31-60 days ahead is the cheapest option ($328.84). Last-minute tickets (0-7 days) cost 12.6% more, around $41 per ticket.
-# MAGIC 2. **Cheapest routes, airlines and days:** the cheapest routes are short, busy and with many direct flights (ex: BOS-LGA, $144.53, 416 miles), so distance and competition explain part of the price. Tuesday is the cheapest day and Sunday the most expensive for almost all airlines, and the low-cost airlines (Frontier and Spirit, around $199) are the cheapest.
+# MAGIC 2. **Cheapest routes, airlines and days:**   the cheapest routes are short and have many direct flights (ex: BOS-LGA, $144.53, 416 miles), so distance explains part of the price. Tuesday is the cheapest day and Sunday the most expensive for almost all airlines, and the low-cost airlines (Frontier and Spirit, around $199) are the cheapest.
 # MAGIC 3. **Complaints vs price:** cheaper airlines tend to have more complaints (correlation of -0.58), but JetBlue, with a medium price, has the most complaints (86%), so price doesn't explain everything.
-# MAGIC 4. **Deals in real time:** the streaming pipeline compared each new price with the average of its route and found 5 deals in the first 60 prices, and the MERGE kept the best price of each route always updated (17 routes got cheaper after the second wave). Thanks to the checkpoint, each file was read only once.
+# MAGIC 4. **Deals in real time:** the streaming pipeline compared each new price with the average of its route and found 5 deals in the first 60 prices. Thanks to the checkpoint, when 3 more files arrived only the new ones were read (120 rows, not 180).
 # MAGIC
 # MAGIC ## Practical recommendation
 # MAGIC Book 31-60 days ahead, fly on a Tuesday and choose a short, busy route. For the lowest price choose Frontier or Spirit (but expect more complaints); for a balance between price and service choose American, the cheapest of the big airlines ($309). Avoid last-minute tickets and Sunday flights.
